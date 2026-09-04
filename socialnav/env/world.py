@@ -1,6 +1,7 @@
-"""Static A* navigation with reactive dynamic-obstacle avoidance."""
+"""Static A* navigation with reactive avoidance and personal-space display."""
 
 import time
+from math import cos, sin, tau
 
 import pybullet as p
 import pybullet_data
@@ -32,6 +33,8 @@ PEDESTRIAN_TARGET = (CELL_SIZE, CELL_SIZE)
 PEDESTRIAN_SPEED = 0.40
 STOP_DISTANCE = 0.55
 SLOW_DISTANCE = 1.25
+SOCIAL_DISTANCE = 1.0
+PERSONAL_SPACE_SEGMENTS = 32
 
 
 def _configure_world(client_id: int) -> None:
@@ -176,6 +179,29 @@ def _create_pedestrian(pedestrian: Pedestrian, client_id: int) -> int:
     )
 
 
+def _render_personal_space(
+    pedestrian_id: int,
+    client_id: int,
+    radius: float = SOCIAL_DISTANCE,
+    segments: int = PERSONAL_SPACE_SEGMENTS,
+) -> None:
+    """Draw a ground ring parented to the moving pedestrian."""
+    line_height = -PEDESTRIAN_HEIGHT / 2
+
+    for segment in range(segments):
+        start_angle = tau * segment / segments
+        end_angle = tau * (segment + 1) / segments
+        p.addUserDebugLine(
+            (radius * cos(start_angle), radius * sin(start_angle), line_height),
+            (radius * cos(end_angle), radius * sin(end_angle), line_height),
+            lineColorRGB=(0.1, 0.8, 0.85),
+            lineWidth=2.0,
+            parentObjectUniqueId=pedestrian_id,
+            parentLinkIndex=-1,
+            physicsClientId=client_id,
+        )
+
+
 def _advance_pedestrian(
     pedestrian: Pedestrian, pedestrian_id: int, client_id: int
 ) -> None:
@@ -269,6 +295,7 @@ def main() -> None:
             speed=PEDESTRIAN_SPEED,
         )
         pedestrian_id = _create_pedestrian(pedestrian, client_id)
+        _render_personal_space(pedestrian_id, client_id)
         _follow_path(
             robot_id,
             path,

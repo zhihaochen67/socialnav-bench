@@ -23,6 +23,9 @@ from socialnav.planners.social_planner import social_astar
 _MIN_PEDESTRIAN_SPEED = 0.10
 _MAX_PEDESTRIAN_SPEED = 0.16
 _TARGET_OFFSET_CELLS = 2
+DIVERSE_MIN_PATH_MOVES = 6
+_DIVERSE_MIN_PEDESTRIAN_SPEED = 0.20
+_DIVERSE_MAX_PEDESTRIAN_SPEED = 0.60
 _NEIGHBOR_OFFSETS: tuple[Coordinate, ...] = (
     (0, -1),
     (1, 0),
@@ -137,3 +140,149 @@ def generate_scenarios(count: int, seed: int) -> list[Scenario]:
         )
 
     return scenarios
+
+
+def _free_cells(grid_map: GridMap) -> list[Coordinate]:
+    return [
+        (x, y)
+        for x in range(grid_map.width)
+        for y in range(grid_map.height)
+        if grid_map.is_free((x, y))
+    ]
+
+
+def _off_route_neighbors(
+    grid_map: GridMap,
+    waypoint: Coordinate,
+    path_cells: set[Coordinate],
+) -> list[Coordinate]:
+    neighbors = [
+        (waypoint[0] + dx, waypoint[1] + dy)
+        for dx, dy in _NEIGHBOR_OFFSETS
+    ]
+    return [
+        neighbor
+        for neighbor in neighbors
+        if grid_map.is_free(neighbor) and neighbor not in path_cells
+    ]
+
+
+def _diverse_options() -> list[
+    tuple[Coordinate, Coordinate, Coordinate, Coordinate]
+]:
+    """Return planner-neutral start, goal, and pedestrian templates."""
+    grid_map = build_demo_grid()
+    free_cells = _free_cells(grid_map)
+    options: list[tuple[Coordinate, Coordinate, Coordinate, Coordinate]] = []
+
+    for start in free_cells:
+        for goal in free_cells:
+            if start == goal:
+                continue
+
+            path = astar(grid_map, start, goal)
+            if path is None or len(path) - 1 < DIVERSE_MIN_PATH_MOVES:
+                continue
+
+            path_cells = set(path)
+            for waypoint in path[1:-1]:
+                off_route = _off_route_neighbors(
+                    grid_map,
+                    waypoint,
+                    path_cells,
+                )
+
+                for pedestrian_target in off_route:
+                    options.append(
+                        (start, goal, waypoint, pedestrian_target)
+                    )
+
+                for pedestrian_start in off_route:
+                    for pedestrian_target in off_route:
+                        if pedestrian_start != pedestrian_target:
+                            options.append(
+                                (
+                                    start,
+                                    goal,
+                                    pedestrian_start,
+                                    pedestrian_target,
+                                )
+                            )
+
+    if not options:
+        raise RuntimeError("benchmark map has no diverse scenario options")
+    return options
+
+
+def generate_diverse_scenarios(count: int, seed: int) -> list[Scenario]:
+    """Generate seeded planner-neutral scenarios around ordinary A* paths."""
+    if count < 0:
+        raise ValueError("count must be non-negative")
+
+    random = Random(seed)
+    options = _diverse_options()
+    remaining_options: list[
+        tuple[Coordinate, Coordinate, Coordinate, Coordinate]
+    ] = []
+    scenarios = []
+
+    for episode_index in range(count):
+        if not remaining_options:
+            remaining_options = options.copy()
+            random.shuffle(remaining_options)
+
+        start, goal, pedestrian_start, pedestrian_target = (
+            remaining_options.pop()
+        )
+        pedestrian_speed = round(
+            random.uniform(
+                _DIVERSE_MIN_PEDESTRIAN_SPEED,
+                _DIVERSE_MAX_PEDESTRIAN_SPEED,
+            ),
+            6,
+        )
+        scenarios.append(
+            Scenario(
+                scenario_id=(
+                    f"diverse-seed-{seed}-episode-{episode_index:04d}"
+                ),
+                grid_width=GRID_WIDTH,
+                grid_height=GRID_HEIGHT,
+                obstacle_cells=tuple(sorted(OBSTACLES)),
+                start=start,
+                goal=goal,
+                grid_scale=CELL_SIZE,
+                pedestrian_start=grid_to_world(pedestrian_start),
+                pedestrian_target=grid_to_world(pedestrian_target),
+                pedestrian_speed=pedestrian_speed,
+            )
+        )
+
+    return scenarios
+
+
+def is_pedestrian_route_relevant(
+    scenario: Scenario,
+    path: list[Coordinate],
+) -> bool:
+    """Return whether pedestrian endpoints touch one route neighborhood."""
+    pedestrian_start = (
+        round(scenario.pedestrian_start[0] / scenario.grid_scale),
+        round(scenario.pedestrian_start[1] / scenario.grid_scale),
+    )
+    pedestrian_target = (
+        round(scenario.pedestrian_target[0] / scenario.grid_scale),
+        round(scenario.pedestrian_target[1] / scenario.grid_scale),
+    )
+
+    for waypoint in path[1:-1]:
+        start_distance = abs(pedestrian_start[0] - waypoint[0]) + abs(
+            pedestrian_start[1] - waypoint[1]
+        )
+        target_distance = abs(pedestrian_target[0] - waypoint[0]) + abs(
+            pedestrian_target[1] - waypoint[1]
+        )
+        if start_distance <= 1 and target_distance == 1:
+            return True
+
+    return False

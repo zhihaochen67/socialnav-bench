@@ -1,7 +1,9 @@
 import pytest
 
+from experiments.run_benchmark import build_parser
 from socialnav.benchmark import (
     aggregate_results,
+    generate_diverse_scenarios,
     generate_scenarios,
     run_episode,
 )
@@ -142,3 +144,31 @@ def test_runner_rejects_nonpositive_timeout() -> None:
 
     with pytest.raises(ValueError, match="max_steps must be positive"):
         run_episode(scenario, "astar", max_steps=0)
+
+
+@pytest.mark.parametrize("method", ["astar", "dynamic", "social"])
+def test_runner_accepts_diverse_scenario(method: str) -> None:
+    scenario = generate_diverse_scenarios(1, seed=42)[0]
+
+    result = run_episode(scenario, method)
+
+    assert result.steps > 0
+    assert result.minimum_human_distance is not None
+
+
+def test_cli_defaults_to_controlled_scenario_mode() -> None:
+    args = build_parser().parse_args([])
+
+    assert args.scenario_mode == "controlled"
+
+
+@pytest.mark.parametrize("mode", ["controlled", "diverse"])
+def test_cli_accepts_supported_scenario_modes(mode: str) -> None:
+    args = build_parser().parse_args(["--scenario-mode", mode])
+
+    assert args.scenario_mode == mode
+
+
+def test_cli_rejects_unknown_scenario_mode() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--scenario-mode", "unknown"])

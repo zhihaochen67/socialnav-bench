@@ -6,6 +6,7 @@ from math import cos, sin, tau
 import pybullet as p
 import pybullet_data
 
+from socialnav.evaluation import EpisodeResult, evaluate_episode
 from socialnav.env.demo_map import (
     CELL_SIZE,
     GOAL,
@@ -22,6 +23,7 @@ from socialnav.env.demo_map import (
 )
 from socialnav.env.grid_map import Coordinate, GridMap
 from socialnav.env.pedestrian import Pedestrian
+from socialnav.metrics import Position, compute_path_length
 from socialnav.planners.astar import astar
 from socialnav.planners.dynamic_avoidance import compute_speed_scale
 from socialnav.planners.social_planner import social_astar
@@ -31,6 +33,7 @@ STEPS_PER_CELL = 90
 ROBOT_RADIUS = 0.18
 ROBOT_HEIGHT = 0.20
 OBSTACLE_HEIGHT = 0.50
+OBSTACLE_HALF_EXTENT = CELL_SIZE * 0.38
 PEDESTRIAN_RADIUS = 0.16
 PEDESTRIAN_HEIGHT = 0.80
 PEDESTRIAN_START = grid_to_world(PEDESTRIAN_PLANNING_CELL)
@@ -38,6 +41,8 @@ PEDESTRIAN_TARGET = (CELL_SIZE, CELL_SIZE)
 PEDESTRIAN_SPEED = 0.40
 STOP_DISTANCE = 0.55
 SLOW_DISTANCE = 1.25
+GOAL_TOLERANCE = 0.05
+HUMAN_COLLISION_DISTANCE = ROBOT_RADIUS + PEDESTRIAN_RADIUS
 ROBOT_PATH_MODE = "social"
 ASTAR_PATH_COLOR = (1.0, 0.55, 0.05)
 SOCIAL_PATH_COLOR = (0.1, 0.85, 0.25)
@@ -67,15 +72,14 @@ def _configure_world(client_id: int) -> None:
 
 
 def _render_obstacles(grid_map: GridMap, client_id: int) -> None:
-    half_width = CELL_SIZE * 0.38
     collision_shape = p.createCollisionShape(
         p.GEOM_BOX,
-        halfExtents=(half_width, half_width, OBSTACLE_HEIGHT / 2),
+        halfExtents=(OBSTACLE_HALF_EXTENT,) * 2 + (OBSTACLE_HEIGHT / 2,),
         physicsClientId=client_id,
     )
     visual_shape = p.createVisualShape(
         p.GEOM_BOX,
-        halfExtents=(half_width, half_width, OBSTACLE_HEIGHT / 2),
+        halfExtents=(OBSTACLE_HALF_EXTENT,) * 2 + (OBSTACLE_HEIGHT / 2,),
         rgbaColor=(0.65, 0.18, 0.15, 1.0),
         physicsClientId=client_id,
     )
@@ -235,19 +239,34 @@ def _follow_path(
     client_id: int,
     stop_distance: float = STOP_DISTANCE,
     slow_distance: float = SLOW_DISTANCE,
-) -> None:
+) -> tuple[list[Position], list[Position], int]:
     height = ROBOT_HEIGHT / 2 + 0.01
     positions = interpolate_path(path, steps_per_cell=STEPS_PER_CELL)
     if not positions:
-        return
+        return [], [], 0
 
     last_position_index = len(positions) - 1
     path_progress = 0.0
     robot_position = positions[0]
+    robot_base_position, _ = p.getBasePositionAndOrientation(
+        robot_id,
+        physicsClientId=client_id,
+    )
+    pedestrian_base_position, _ = p.getBasePositionAndOrientation(
+        pedestrian_id,
+        physicsClientId=client_id,
+    )
+    robot_trajectory: list[Position] = [
+        (robot_base_position[0], robot_base_position[1])
+    ]
+    pedestrian_trajectory: list[Position] = [
+        (pedestrian_base_position[0], pedestrian_base_position[1])
+    ]
+    steps = 0
 
     while path_progress < last_position_index:
         if not p.isConnected(client_id):
-            return
+            return robot_trajectory, pedestrian_trajectory, steps
 
         speed_scale = compute_speed_scale(
             robot_position,
@@ -280,7 +299,49 @@ def _follow_path(
         )
         _advance_pedestrian(pedestrian, pedestrian_id, client_id)
         p.stepSimulation(physicsClientId=client_id)
+        steps += 1
+
+        robot_base_position, _ = p.getBasePositionAndOrientation(
+            robot_id,
+            physicsClientId=client_id,
+        )
+        pedestrian_base_position, _ = p.getBasePositionAndOrientation(
+            pedestrian_id,
+            physicsClientId=client_id,
+        )
+        robot_trajectory.append(
+            (robot_base_position[0], robot_base_position[1])
+        )
+        pedestrian_trajectory.append(
+            (pedestrian_base_position[0], pedestrian_base_position[1])
+        )
         time.sleep(SIMULATION_STEP)
+
+    return robot_trajectory, pedestrian_trajectory, steps
+
+
+def _print_episode_result(result: EpisodeResult) -> None:
+    time_to_goal = (
+        "None"
+        if result.time_to_goal is None
+        else f"{result.time_to_goal:.3f} s"
+    )
+    minimum_human_distance = (
+        "None"
+        if result.minimum_human_distance is None
+        else f"{result.minimum_human_distance:.3f}"
+    )
+    print("\nEpisode Result")
+    print("--------------")
+    print(f"Success: {result.success}")
+    print(f"Path Length: {result.path_length:.3f}")
+    print(f"Time to Goal: {time_to_goal}")
+    print(f"SPL: {result.spl:.3f}")
+    print(f"Minimum Human Distance: {minimum_human_distance}")
+    print(f"Social Violation Rate: {result.social_violation_rate:.3f}")
+    print(f"Human Collision: {result.human_collision}")
+    print(f"Obstacle Collision: {result.obstacle_collision}")
+    print(f"Steps: {result.steps}")
 
 
 def main() -> None:
@@ -363,13 +424,35 @@ def main() -> None:
         )
         pedestrian_id = _create_pedestrian(pedestrian, client_id)
         _render_personal_space(pedestrian_id, client_id)
-        _follow_path(
+        robot_trajectory, pedestrian_trajectory, steps = _follow_path(
             robot_id,
             robot_path,
             pedestrian,
             pedestrian_id,
             client_id,
         )
+
+        shortest_path_length = compute_path_length(
+            [grid_to_world(coordinate) for coordinate in astar_path]
+        )
+        result = evaluate_episode(
+            robot_trajectory,
+            [pedestrian_trajectory],
+            goal_position=grid_to_world(GOAL),
+            goal_tolerance=GOAL_TOLERANCE,
+            steps=steps,
+            dt=SIMULATION_STEP,
+            shortest_path_length=shortest_path_length,
+            social_distance=SOCIAL_DISTANCE,
+            human_collision_distance=HUMAN_COLLISION_DISTANCE,
+            obstacle_positions=[
+                grid_to_world(coordinate)
+                for coordinate in sorted(grid_map.get_obstacles())
+            ],
+            obstacle_half_extent=OBSTACLE_HALF_EXTENT,
+            robot_radius=ROBOT_RADIUS,
+        )
+        _print_episode_result(result)
 
         while p.isConnected(client_id):
             _advance_pedestrian(pedestrian, pedestrian_id, client_id)

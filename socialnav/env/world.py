@@ -1,4 +1,4 @@
-"""Static A* navigation demo with one deterministic pedestrian."""
+"""Static A* navigation with reactive dynamic-obstacle avoidance."""
 
 import time
 
@@ -18,6 +18,7 @@ from socialnav.env.demo_map import (
 from socialnav.env.grid_map import Coordinate, GridMap
 from socialnav.env.pedestrian import Pedestrian
 from socialnav.planners.astar import astar
+from socialnav.planners.dynamic_avoidance import compute_speed_scale
 
 SIMULATION_STEP = 1.0 / 240.0
 STEPS_PER_CELL = 90
@@ -29,6 +30,8 @@ PEDESTRIAN_HEIGHT = 0.80
 PEDESTRIAN_START = (CELL_SIZE, CELL_SIZE * (GRID_HEIGHT - 1))
 PEDESTRIAN_TARGET = (CELL_SIZE, CELL_SIZE)
 PEDESTRIAN_SPEED = 0.40
+STOP_DISTANCE = 0.55
+SLOW_DISTANCE = 1.25
 
 
 def _configure_world(client_id: int) -> None:
@@ -191,16 +194,48 @@ def _follow_path(
     pedestrian: Pedestrian,
     pedestrian_id: int,
     client_id: int,
+    stop_distance: float = STOP_DISTANCE,
+    slow_distance: float = SLOW_DISTANCE,
 ) -> None:
     height = ROBOT_HEIGHT / 2 + 0.01
     positions = interpolate_path(path, steps_per_cell=STEPS_PER_CELL)
+    if not positions:
+        return
 
-    for x, y in positions:
+    last_position_index = len(positions) - 1
+    path_progress = 0.0
+    robot_position = positions[0]
+
+    while path_progress < last_position_index:
         if not p.isConnected(client_id):
             return
+
+        speed_scale = compute_speed_scale(
+            robot_position,
+            pedestrian.position,
+            stop_distance,
+            slow_distance,
+        )
+        path_progress = min(
+            path_progress + speed_scale,
+            float(last_position_index),
+        )
+
+        lower_index = int(path_progress)
+        if lower_index == last_position_index:
+            robot_position = positions[-1]
+        else:
+            fraction = path_progress - lower_index
+            start_x, start_y = positions[lower_index]
+            end_x, end_y = positions[lower_index + 1]
+            robot_position = (
+                start_x + (end_x - start_x) * fraction,
+                start_y + (end_y - start_y) * fraction,
+            )
+
         p.resetBasePositionAndOrientation(
             robot_id,
-            (x, y, height),
+            (*robot_position, height),
             (0.0, 0.0, 0.0, 1.0),
             physicsClientId=client_id,
         )
@@ -210,7 +245,7 @@ def _follow_path(
 
 
 def main() -> None:
-    """Run static A* beside one pedestrian the robot does not react to."""
+    """Run static A* with local reactive pedestrian avoidance."""
     grid_map = build_demo_grid()
     path = astar(grid_map, START, GOAL)
     if path is None:

@@ -1,6 +1,7 @@
-"""Pure grid helpers for the fixed static-navigation demo."""
+"""Pure grid helpers for the deterministic navigation demo."""
 
 from collections.abc import Sequence
+from math import hypot
 
 from socialnav.env.grid_map import Coordinate, GridMap
 
@@ -9,6 +10,9 @@ GRID_HEIGHT = 6
 CELL_SIZE = 0.75
 START: Coordinate = (0, 0)
 GOAL: Coordinate = (7, 5)
+PEDESTRIAN_PLANNING_CELL: Coordinate = (1, 4)
+SOCIAL_DISTANCE = 0.70
+SOCIAL_WEIGHT = 10.0
 OBSTACLES: tuple[Coordinate, ...] = (
     (2, 0),
     (2, 1),
@@ -36,6 +40,24 @@ def grid_to_world(
 ) -> WorldCoordinate:
     """Map a grid cell to the center of its PyBullet ground-plane cell."""
     return coordinate[0] * cell_size, coordinate[1] * cell_size
+
+
+def path_minimum_clearance(
+    path: Sequence[Coordinate],
+    pedestrian_position: WorldCoordinate,
+    cell_size: float = CELL_SIZE,
+) -> float:
+    """Return the closest world-space distance from a path to a pedestrian."""
+    if not path:
+        raise ValueError("path must not be empty")
+
+    world_path = (
+        grid_to_world(coordinate, cell_size) for coordinate in path
+    )
+    return min(
+        hypot(x - pedestrian_position[0], y - pedestrian_position[1])
+        for x, y in world_path
+    )
 
 
 def interpolate_path(

@@ -11,15 +11,20 @@ from socialnav.env.demo_map import (
     GOAL,
     GRID_HEIGHT,
     GRID_WIDTH,
+    PEDESTRIAN_PLANNING_CELL,
+    SOCIAL_DISTANCE,
+    SOCIAL_WEIGHT,
     START,
     build_demo_grid,
     grid_to_world,
     interpolate_path,
+    path_minimum_clearance,
 )
 from socialnav.env.grid_map import Coordinate, GridMap
 from socialnav.env.pedestrian import Pedestrian
 from socialnav.planners.astar import astar
 from socialnav.planners.dynamic_avoidance import compute_speed_scale
+from socialnav.planners.social_planner import social_astar
 
 SIMULATION_STEP = 1.0 / 240.0
 STEPS_PER_CELL = 90
@@ -28,12 +33,14 @@ ROBOT_HEIGHT = 0.20
 OBSTACLE_HEIGHT = 0.50
 PEDESTRIAN_RADIUS = 0.16
 PEDESTRIAN_HEIGHT = 0.80
-PEDESTRIAN_START = (CELL_SIZE, CELL_SIZE * (GRID_HEIGHT - 1))
+PEDESTRIAN_START = grid_to_world(PEDESTRIAN_PLANNING_CELL)
 PEDESTRIAN_TARGET = (CELL_SIZE, CELL_SIZE)
 PEDESTRIAN_SPEED = 0.40
 STOP_DISTANCE = 0.55
 SLOW_DISTANCE = 1.25
-SOCIAL_DISTANCE = 1.0
+ROBOT_PATH_MODE = "social"
+ASTAR_PATH_COLOR = (1.0, 0.55, 0.05)
+SOCIAL_PATH_COLOR = (0.1, 0.85, 0.25)
 PERSONAL_SPACE_SEGMENTS = 32
 
 
@@ -103,11 +110,17 @@ def _render_goal(client_id: int) -> None:
     )
 
 
-def _render_path(path: list[Coordinate], client_id: int) -> None:
+def _render_path(
+    path: list[Coordinate],
+    client_id: int,
+    color: tuple[float, float, float],
+    line_height: float,
+    line_width: float,
+) -> None:
     marker_shape = p.createVisualShape(
         p.GEOM_SPHERE,
         radius=0.045,
-        rgbaColor=(1.0, 0.65, 0.05, 1.0),
+        rgbaColor=(*color, 1.0),
         physicsClientId=client_id,
     )
     world_path = [grid_to_world(coordinate) for coordinate in path]
@@ -117,16 +130,16 @@ def _render_path(path: list[Coordinate], client_id: int) -> None:
             baseMass=0.0,
             baseCollisionShapeIndex=-1,
             baseVisualShapeIndex=marker_shape,
-            basePosition=(x, y, 0.04),
+            basePosition=(x, y, line_height),
             physicsClientId=client_id,
         )
 
     for first, second in zip(world_path, world_path[1:]):
         p.addUserDebugLine(
-            (first[0], first[1], 0.035),
-            (second[0], second[1], 0.035),
-            lineColorRGB=(1.0, 0.65, 0.05),
-            lineWidth=3.0,
+            (first[0], first[1], line_height),
+            (second[0], second[1], line_height),
+            lineColorRGB=color,
+            lineWidth=line_width,
             physicsClientId=client_id,
         )
 
@@ -271,13 +284,54 @@ def _follow_path(
 
 
 def main() -> None:
-    """Run static A* with local reactive pedestrian avoidance."""
+    """Compare geometric and social-aware A* paths in one scene."""
     grid_map = build_demo_grid()
-    path = astar(grid_map, START, GOAL)
-    if path is None:
+    astar_path = astar(grid_map, START, GOAL)
+    if astar_path is None:
         raise RuntimeError(
-            "A* could not find a path for the static navigation demo."
+            "A* could not find a path for the navigation demo."
         )
+
+    pedestrian_planning_position = grid_to_world(PEDESTRIAN_PLANNING_CELL)
+    social_path = social_astar(
+        grid_map,
+        START,
+        GOAL,
+        pedestrian_positions=[pedestrian_planning_position],
+        social_distance=SOCIAL_DISTANCE,
+        social_weight=SOCIAL_WEIGHT,
+        grid_scale=CELL_SIZE,
+    )
+    if social_path is None:
+        raise RuntimeError(
+            "Social-aware A* could not find a path for the navigation demo."
+        )
+
+    if ROBOT_PATH_MODE == "astar":
+        robot_path = astar_path
+    elif ROBOT_PATH_MODE == "social":
+        robot_path = social_path
+    else:
+        raise ValueError("ROBOT_PATH_MODE must be 'astar' or 'social'")
+
+    astar_clearance = path_minimum_clearance(
+        astar_path,
+        pedestrian_planning_position,
+    )
+    social_clearance = path_minimum_clearance(
+        social_path,
+        pedestrian_planning_position,
+    )
+    print(f"Planner comparison at pedestrian cell {PEDESTRIAN_PLANNING_CELL}:")
+    print(
+        f"  A* (orange): {len(astar_path) - 1} moves, "
+        f"minimum pedestrian clearance = {astar_clearance:.2f}"
+    )
+    print(
+        f"  Social A* (green): {len(social_path) - 1} moves, "
+        f"minimum pedestrian clearance = {social_clearance:.2f}"
+    )
+    print(f"  Robot follows: {ROBOT_PATH_MODE}")
 
     client_id = p.connect(p.GUI)
     if client_id < 0:
@@ -287,7 +341,20 @@ def main() -> None:
         _configure_world(client_id)
         _render_obstacles(grid_map, client_id)
         _render_goal(client_id)
-        _render_path(path, client_id)
+        _render_path(
+            astar_path,
+            client_id,
+            color=ASTAR_PATH_COLOR,
+            line_height=0.03,
+            line_width=2.0,
+        )
+        _render_path(
+            social_path,
+            client_id,
+            color=SOCIAL_PATH_COLOR,
+            line_height=0.055,
+            line_width=4.0,
+        )
         robot_id = _create_robot(client_id)
         pedestrian = Pedestrian(
             start_position=PEDESTRIAN_START,
@@ -298,7 +365,7 @@ def main() -> None:
         _render_personal_space(pedestrian_id, client_id)
         _follow_path(
             robot_id,
-            path,
+            robot_path,
             pedestrian,
             pedestrian_id,
             client_id,

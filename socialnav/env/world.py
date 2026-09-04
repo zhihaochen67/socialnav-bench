@@ -1,4 +1,4 @@
-"""Deterministic static-navigation demo for SocialNav-Bench."""
+"""Static A* navigation demo with one deterministic pedestrian."""
 
 import time
 
@@ -16,6 +16,7 @@ from socialnav.env.demo_map import (
     interpolate_path,
 )
 from socialnav.env.grid_map import Coordinate, GridMap
+from socialnav.env.pedestrian import Pedestrian
 from socialnav.planners.astar import astar
 
 SIMULATION_STEP = 1.0 / 240.0
@@ -23,6 +24,11 @@ STEPS_PER_CELL = 90
 ROBOT_RADIUS = 0.18
 ROBOT_HEIGHT = 0.20
 OBSTACLE_HEIGHT = 0.50
+PEDESTRIAN_RADIUS = 0.16
+PEDESTRIAN_HEIGHT = 0.80
+PEDESTRIAN_START = (CELL_SIZE, CELL_SIZE * (GRID_HEIGHT - 1))
+PEDESTRIAN_TARGET = (CELL_SIZE, CELL_SIZE)
+PEDESTRIAN_SPEED = 0.40
 
 
 def _configure_world(client_id: int) -> None:
@@ -143,8 +149,48 @@ def _create_robot(client_id: int) -> int:
     )
 
 
+def _create_pedestrian(pedestrian: Pedestrian, client_id: int) -> int:
+    collision_shape = p.createCollisionShape(
+        p.GEOM_CYLINDER,
+        radius=PEDESTRIAN_RADIUS,
+        height=PEDESTRIAN_HEIGHT,
+        physicsClientId=client_id,
+    )
+    visual_shape = p.createVisualShape(
+        p.GEOM_CYLINDER,
+        radius=PEDESTRIAN_RADIUS,
+        length=PEDESTRIAN_HEIGHT,
+        rgbaColor=(0.75, 0.2, 0.85, 1.0),
+        physicsClientId=client_id,
+    )
+    x, y = pedestrian.position
+    return p.createMultiBody(
+        baseMass=0.0,
+        baseCollisionShapeIndex=collision_shape,
+        baseVisualShapeIndex=visual_shape,
+        basePosition=(x, y, PEDESTRIAN_HEIGHT / 2 + 0.01),
+        physicsClientId=client_id,
+    )
+
+
+def _advance_pedestrian(
+    pedestrian: Pedestrian, pedestrian_id: int, client_id: int
+) -> None:
+    x, y = pedestrian.advance(SIMULATION_STEP)
+    p.resetBasePositionAndOrientation(
+        pedestrian_id,
+        (x, y, PEDESTRIAN_HEIGHT / 2 + 0.01),
+        (0.0, 0.0, 0.0, 1.0),
+        physicsClientId=client_id,
+    )
+
+
 def _follow_path(
-    robot_id: int, path: list[Coordinate], client_id: int
+    robot_id: int,
+    path: list[Coordinate],
+    pedestrian: Pedestrian,
+    pedestrian_id: int,
+    client_id: int,
 ) -> None:
     height = ROBOT_HEIGHT / 2 + 0.01
     positions = interpolate_path(path, steps_per_cell=STEPS_PER_CELL)
@@ -158,12 +204,13 @@ def _follow_path(
             (0.0, 0.0, 0.0, 1.0),
             physicsClientId=client_id,
         )
+        _advance_pedestrian(pedestrian, pedestrian_id, client_id)
         p.stepSimulation(physicsClientId=client_id)
         time.sleep(SIMULATION_STEP)
 
 
 def main() -> None:
-    """Run the fixed A* static-navigation demonstration."""
+    """Run static A* beside one pedestrian the robot does not react to."""
     grid_map = build_demo_grid()
     path = astar(grid_map, START, GOAL)
     if path is None:
@@ -181,9 +228,22 @@ def main() -> None:
         _render_goal(client_id)
         _render_path(path, client_id)
         robot_id = _create_robot(client_id)
-        _follow_path(robot_id, path, client_id)
+        pedestrian = Pedestrian(
+            start_position=PEDESTRIAN_START,
+            target_position=PEDESTRIAN_TARGET,
+            speed=PEDESTRIAN_SPEED,
+        )
+        pedestrian_id = _create_pedestrian(pedestrian, client_id)
+        _follow_path(
+            robot_id,
+            path,
+            pedestrian,
+            pedestrian_id,
+            client_id,
+        )
 
         while p.isConnected(client_id):
+            _advance_pedestrian(pedestrian, pedestrian_id, client_id)
             p.stepSimulation(physicsClientId=client_id)
             time.sleep(SIMULATION_STEP)
     except KeyboardInterrupt:

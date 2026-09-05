@@ -31,6 +31,7 @@ from socialnav.planners.astar import astar
 from socialnav.planners.dynamic_avoidance import compute_speed_scale
 from socialnav.planners.social_planner import social_astar
 
+from .diagnostics import EpisodeTrace, did_episode_time_out
 from .scenario import Scenario, build_scenario_grid
 
 SUPPORTED_METHODS = ("astar", "dynamic", "social")
@@ -112,6 +113,19 @@ def run_episode(
     max_steps: int = MAX_EPISODE_STEPS,
 ) -> EpisodeResult:
     """Run one deterministic benchmark episode in PyBullet DIRECT mode."""
+    result, _ = run_episode_with_trace(
+        scenario, method, max_steps=max_steps
+    )
+    return result
+
+
+def run_episode_with_trace(
+    scenario: Scenario,
+    method: str,
+    *,
+    max_steps: int = MAX_EPISODE_STEPS,
+) -> tuple[EpisodeResult, EpisodeTrace]:
+    """Run an episode and return metrics plus diagnostic runner state."""
     if method not in SUPPORTED_METHODS:
         raise ValueError(
             f"method must be one of {', '.join(SUPPORTED_METHODS)}"
@@ -188,6 +202,7 @@ def run_episode(
         progress = 0.0
         last_position_index = len(path_positions) - 1
         steps = 0
+        speed_scales: list[float] = []
 
         while progress < last_position_index and steps < max_steps:
             if method == "astar":
@@ -200,6 +215,7 @@ def run_episode(
                     SLOW_DISTANCE,
                 )
 
+            speed_scales.append(speed_scale)
             progress = min(
                 progress + speed_scale,
                 float(last_position_index),
@@ -229,7 +245,7 @@ def run_episode(
                 _record_position(pedestrian_id, client_id)
             )
 
-        return evaluate_episode(
+        result = evaluate_episode(
             robot_trajectory,
             [pedestrian_trajectory],
             goal_position=grid_to_world(
@@ -246,5 +262,21 @@ def run_episode(
             obstacle_half_extent=OBSTACLE_HALF_EXTENT,
             robot_radius=ROBOT_RADIUS,
         )
+        trace = EpisodeTrace(
+            planned_path=tuple(
+                grid_to_world(coordinate, scenario.grid_scale)
+                for coordinate in selected_path
+            ),
+            speed_scales=tuple(speed_scales),
+            timed_out=did_episode_time_out(
+                steps=steps,
+                max_steps=max_steps,
+                path_completed=progress >= last_position_index,
+            ),
+            final_robot_position=robot_trajectory[-1],
+            final_pedestrian_position=pedestrian_trajectory[-1],
+            max_steps=max_steps,
+        )
+        return result, trace
     finally:
         p.disconnect(client_id)

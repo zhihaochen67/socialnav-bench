@@ -1,10 +1,30 @@
 """Reproducible headless navigation benchmark."""
 
 from .aggregate import MethodSummary, aggregate_results
+from .diagnostics import (
+    LATE_EPISODE_FRACTION,
+    LATE_STOPPED_FRACTION_THRESHOLD,
+    LONGEST_STOPPED_FRACTION_THRESHOLD,
+    PATH_NEAR_THRESHOLD,
+    STOPPED_SPEED_TOLERANCE,
+    EpisodeTrace,
+    FailureDiagnostic,
+    classify_failure,
+    count_stopped_steps,
+    diagnose_failure,
+    did_episode_time_out,
+    is_point_on_or_near_route,
+    late_stopped_fraction,
+    longest_stopped_streak,
+    nearest_route_waypoint,
+    point_to_route_distance,
+    stopped_fraction,
+)
 from .runner import (
     MAX_EPISODE_STEPS,
     SUPPORTED_METHODS,
     run_episode,
+    run_episode_with_trace,
 )
 from .scenario import (
     DIVERSE_MIN_PATH_MOVES,
@@ -17,14 +37,32 @@ from .scenario import (
 
 __all__ = [
     "DIVERSE_MIN_PATH_MOVES",
+    "LATE_EPISODE_FRACTION",
+    "LATE_STOPPED_FRACTION_THRESHOLD",
+    "LONGEST_STOPPED_FRACTION_THRESHOLD",
     "MAX_EPISODE_STEPS",
+    "PATH_NEAR_THRESHOLD",
+    "STOPPED_SPEED_TOLERANCE",
     "SUPPORTED_METHODS",
+    "EpisodeTrace",
+    "FailureDiagnostic",
     "MethodSummary",
     "Scenario",
     "aggregate_results",
     "build_scenario_grid",
+    "classify_failure",
+    "count_stopped_steps",
+    "diagnose_failure",
+    "did_episode_time_out",
     "generate_diverse_scenarios",
     "generate_scenarios",
+    "is_point_on_or_near_route",
     "is_pedestrian_route_relevant",
+    "late_stopped_fraction",
+    "longest_stopped_streak",
+    "nearest_route_waypoint",
+    "point_to_route_distance",
     "run_episode",
+    "run_episode_with_trace",
+    "stopped_fraction",
 ]

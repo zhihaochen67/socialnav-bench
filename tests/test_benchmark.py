@@ -11,7 +11,7 @@ from socialnav.benchmark import (
     run_episode,
     run_episode_with_trace,
 )
-from socialnav.env.world import SIMULATION_STEP
+from socialnav.env.world import SIMULATION_STEP, SLOW_DISTANCE
 from socialnav.evaluation import EpisodeResult
 
 
@@ -194,13 +194,14 @@ def _blocking_scenario() -> Scenario:
     )
 
 
-def test_supported_method_order_includes_escape_method_last() -> None:
+def test_supported_method_order_includes_recovery_method_last() -> None:
     assert SUPPORTED_METHODS == (
         "astar",
         "dynamic",
         "social",
         "social_replan",
         "social_replan_escape",
+        "social_replan_recovery",
     )
 
 
@@ -312,7 +313,7 @@ def test_failed_replan_retains_path_and_requires_fresh_stop_interval(
 
 @pytest.mark.parametrize(
     "method",
-    ("social_replan", "social_replan_escape"),
+    ("social_replan", "social_replan_escape", "social_replan_recovery"),
 )
 def test_replanning_methods_reject_nonpositive_stop_threshold(method: str) -> None:
     with pytest.raises(ValueError, match="replan_stop_steps must be positive"):
@@ -419,3 +420,184 @@ def test_escape_method_physically_moves_away_after_replan(
     assert escape_trace.replan_steps == (2,)
     assert escape_trace.successful_replans == 1
     assert escape_trace.failed_replans == 0
+
+@pytest.mark.parametrize(
+    "method",
+    ("astar", "dynamic", "social", "social_replan", "social_replan_escape"),
+)
+def test_existing_methods_never_record_recoveries(method: str) -> None:
+    scenario = generate_scenarios(1, seed=42)[0]
+
+    _, trace = run_episode_with_trace(scenario, method, max_steps=1)
+
+    assert trace.recovery_count == 0
+    assert trace.recovery_trigger_steps == ()
+    assert trace.successful_recoveries == 0
+    assert trace.failed_recoveries == 0
+    assert trace.recovery_path_lengths == ()
+
+
+def test_recovery_not_used_when_replanned_route_can_start_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [(1, 1), (2, 1)]
+        return [start, (0, 1), (0, 0), (1, 0), (2, 0), (2, 1)]
+
+    def unexpected_recovery(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("safe replanned route triggered recovery")
+
+    monkeypatch.setattr(runner_module, "social_astar", fake_social_astar)
+    monkeypatch.setattr(
+        runner_module,
+        "find_clearance_recovery_path",
+        unexpected_recovery,
+    )
+
+    _, trace = run_episode_with_trace(
+        _escape_blocking_scenario(),
+        "social_replan_recovery",
+        max_steps=3,
+        replan_stop_steps=2,
+    )
+
+    assert calls == 2
+    assert trace.speed_scales == (0.0, 0.0, 0.25)
+    assert trace.recovery_count == 0
+
+
+def test_recovery_activates_moves_and_replans_after_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    social_calls: list[
+        tuple[tuple[int, int], tuple[tuple[float, float], ...]]
+    ] = []
+    recovery_calls: list[
+        tuple[
+            tuple[int, int],
+            tuple[float, float],
+            tuple[float, float],
+            float,
+        ]
+    ] = []
+
+    def fake_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        *,
+        pedestrian_positions: list[tuple[float, float]],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]]:
+        social_calls.append((start, tuple(pedestrian_positions)))
+        if len(social_calls) <= 2:
+            return [start, (2, 1)]
+        return [start, (0, 0), (1, 0), (2, 0), (2, 1)]
+
+    def fake_recovery(
+        _grid_map: object,
+        start: tuple[int, int],
+        robot_position: tuple[float, float],
+        pedestrian_position: tuple[float, float],
+        _grid_scale: float,
+        target_clearance: float,
+    ) -> list[tuple[int, int]]:
+        recovery_calls.append(
+            (
+                start,
+                robot_position,
+                pedestrian_position,
+                target_clearance,
+            )
+        )
+        return [(0, 1)]
+
+    monkeypatch.setattr(runner_module, "social_astar", fake_social_astar)
+    monkeypatch.setattr(
+        runner_module,
+        "find_clearance_recovery_path",
+        fake_recovery,
+    )
+    monkeypatch.setattr(runner_module, "STEPS_PER_CELL", 1)
+
+    result, trace = run_episode_with_trace(
+        _escape_blocking_scenario(),
+        "social_replan_recovery",
+        max_steps=7,
+        replan_stop_steps=2,
+    )
+
+    assert result.steps == 7
+    assert len(social_calls) == 3
+    assert social_calls[2][0] == (0, 1)
+    assert recovery_calls == [
+        ((1, 1), (1.0, 1.0), (1.25, 1.0), SLOW_DISTANCE)
+    ]
+    assert trace.replan_count == 2
+    assert trace.replan_steps == (2, 7)
+    assert trace.successful_replans == 2
+    assert trace.failed_replans == 0
+    assert trace.recovery_count == 1
+    assert trace.recovery_trigger_steps == (2,)
+    assert trace.successful_recoveries == 1
+    assert trace.failed_recoveries == 0
+    assert trace.recovery_path_lengths == (1,)
+    assert trace.final_robot_position[0] == pytest.approx(0.0)
+
+
+def test_failed_recovery_is_recorded_and_waiting_remains_conservative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]]:
+        return [start, (2, 1)]
+
+    monkeypatch.setattr(runner_module, "social_astar", fake_social_astar)
+    monkeypatch.setattr(
+        runner_module,
+        "find_clearance_recovery_path",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result, trace = run_episode_with_trace(
+        _escape_blocking_scenario(),
+        "social_replan_recovery",
+        max_steps=4,
+        replan_stop_steps=2,
+    )
+
+    assert result.steps == 4
+    assert trace.speed_scales == (0.0, 0.0, 0.0, 0.0)
+    assert trace.replan_count == 2
+    assert trace.replan_steps == (2, 4)
+    assert trace.successful_replans == 2
+    assert trace.failed_replans == 0
+    assert trace.recovery_count == 2
+    assert trace.recovery_trigger_steps == (2, 4)
+    assert trace.successful_recoveries == 0
+    assert trace.failed_recoveries == 2
+    assert trace.recovery_path_lengths == ()
+    assert trace.final_robot_position == pytest.approx((1.0, 1.0))
+
+
+def test_social_replan_recovery_is_deterministic_on_repeated_runs() -> None:
+    scenario = generate_diverse_scenarios(1, seed=42)[0]
+
+    first = run_episode_with_trace(scenario, "social_replan_recovery")
+    second = run_episode_with_trace(scenario, "social_replan_recovery")
+
+    assert second == first

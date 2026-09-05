@@ -251,7 +251,11 @@ def test_failure_analysis_cli_defaults_to_requested_configuration() -> None:
 
 @pytest.mark.parametrize(
     "method",
-    ("social_replan", "social_replan_escape"),
+    (
+        "social_replan",
+        "social_replan_escape",
+        "social_replan_recovery",
+    ),
 )
 def test_failure_analysis_cli_accepts_replanning_methods(method: str) -> None:
     args = build_parser().parse_args(["--method", method])
@@ -266,6 +270,11 @@ def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:
         replan_steps=(10, 20, 30),
         successful_replans=2,
         failed_replans=1,
+        recovery_count=2,
+        recovery_trigger_steps=(10, 20),
+        successful_recoveries=1,
+        failed_recoveries=1,
+        recovery_path_lengths=(2,),
     )
 
     diagnostic = diagnose_failure(
@@ -280,8 +289,17 @@ def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:
     assert diagnostic.replan_steps == (10, 20, 30)
     assert diagnostic.successful_replans == 2
     assert diagnostic.failed_replans == 1
+    assert diagnostic.recovery_count == 2
+    assert diagnostic.recovery_trigger_steps == (10, 20)
+    assert diagnostic.successful_recoveries == 1
+    assert diagnostic.failed_recoveries == 1
+    assert diagnostic.recovery_path_lengths == (2,)
 
     summary = _summarize(1, [diagnostic])
     assert summary["mean_replan_count_among_failures"] == 3.0
     assert summary["max_replan_count_among_failures"] == 3
     assert summary["failed_replanning_calls"] == 1
+    assert summary["mean_recovery_count_among_failures"] == 2.0
+    assert summary["max_recovery_count_among_failures"] == 2
+    assert summary["successful_recoveries"] == 1
+    assert summary["failed_recoveries"] == 1

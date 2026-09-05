@@ -1,4 +1,4 @@
-"""Run the reproducible five-method SocialNav benchmark."""
+"""Run the reproducible six-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from socialnav.benchmark import (  # noqa: E402
     generate_scenarios,
     run_episode_with_trace,
 )
-from socialnav.env.world import SIMULATION_STEP  # noqa: E402
+from socialnav.env.world import SIMULATION_STEP, SLOW_DISTANCE  # noqa: E402
 from socialnav.planners import ESCAPE_SPEED_SCALE  # noqa: E402
 
 _METHOD_LABELS = {
@@ -34,6 +34,7 @@ _METHOD_LABELS = {
     "social": "Social",
     "social_replan": "Social Replan",
     "social_replan_escape": "Social Replan + Escape",
+    "social_replan_recovery": "Social Replan + Recovery",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -51,17 +52,17 @@ def _format_optional(value: float | None) -> str:
 
 def _print_table(summaries: dict[str, MethodSummary]) -> None:
     print(
-        "Method                  Success  Collision  SPL    PathLen  Time   "
+        "Method                    Success  Collision  SPL    PathLen  Time   "
         "MinHumanDist  SocialViolation"
     )
     print(
-        "----------------------  -------  ---------  -----  -------  -----  "
+        "------------------------  -------  ---------  -----  -------  -----  "
         "------------  ---------------"
     )
     for method in SUPPORTED_METHODS:
         summary = summaries[method]
         print(
-            f"{_METHOD_LABELS[method]:<22}  "
+            f"{_METHOD_LABELS[method]:<24}  "
             f"{summary.success_rate:>7.3f}  "
             f"{summary.collision_rate:>9.3f}  "
             f"{summary.mean_spl:>5.3f}  "
@@ -82,6 +83,34 @@ def _summarize_replans(traces: list[EpisodeTrace]) -> dict[str, float | int]:
             trace.successful_replans for trace in traces
         ),
         "failed_replans": sum(trace.failed_replans for trace in traces),
+    }
+
+
+def _summarize_recoveries(
+    traces: list[EpisodeTrace],
+) -> dict[str, float | int | None]:
+    counts = [trace.recovery_count for trace in traces]
+    path_lengths = [
+        path_length
+        for trace in traces
+        for path_length in trace.recovery_path_lengths
+    ]
+    return {
+        "total_recoveries": sum(counts),
+        "mean_recovery_count": sum(counts) / len(counts),
+        "max_recovery_count": max(counts),
+        "successful_recoveries": sum(
+            trace.successful_recoveries for trace in traces
+        ),
+        "failed_recoveries": sum(
+            trace.failed_recoveries for trace in traces
+        ),
+        "mean_recovery_path_length": (
+            sum(path_lengths) / len(path_lengths)
+            if path_lengths
+            else None
+        ),
+        "max_recovery_path_length": max(path_lengths, default=0),
     }
 
 
@@ -143,6 +172,7 @@ def main() -> None:
             "replan_stop_seconds": REPLAN_STOP_SECONDS,
             "replan_stop_steps": REPLAN_STOP_STEPS,
             "escape_speed_scale": ESCAPE_SPEED_SCALE,
+            "recovery_target_clearance": SLOW_DISTANCE,
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
@@ -154,6 +184,10 @@ def main() -> None:
                     "social A* with online replanning and direction-aware "
                     "reactive escape control"
                 ),
+                "social_replan_recovery": (
+                    "social A* with online replanning, direction-aware "
+                    "escape control, and local clearance recovery"
+                ),
             },
         },
         "scenarios": [asdict(scenario) for scenario in scenarios],
@@ -161,6 +195,9 @@ def main() -> None:
             method: {
                 "summary": asdict(summaries[method]),
                 "replanning": _summarize_replans(
+                    traces_by_method[method]
+                ),
+                "recovery": _summarize_recoveries(
                     traces_by_method[method]
                 ),
                 "episodes": [
@@ -172,6 +209,19 @@ def main() -> None:
                             "replan_steps": list(trace.replan_steps),
                             "successful_replans": trace.successful_replans,
                             "failed_replans": trace.failed_replans,
+                            "recovery_count": trace.recovery_count,
+                            "recovery_trigger_steps": list(
+                                trace.recovery_trigger_steps
+                            ),
+                            "successful_recoveries": (
+                                trace.successful_recoveries
+                            ),
+                            "failed_recoveries": (
+                                trace.failed_recoveries
+                            ),
+                            "recovery_path_lengths": list(
+                                trace.recovery_path_lengths
+                            ),
                         },
                     }
                     for scenario, result, trace in zip(

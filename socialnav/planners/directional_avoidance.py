@@ -8,6 +8,31 @@ ESCAPE_SPEED_SCALE = 0.25
 DIRECTION_DOT_TOLERANCE = 1e-12
 
 
+def is_separation_increasing(
+    robot_position: Position,
+    pedestrian_position: Position,
+    intended_motion: Position,
+    *,
+    tolerance: float = DIRECTION_DOT_TOLERANCE,
+) -> bool:
+    """Return whether motion points clearly away from the pedestrian."""
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be non-negative")
+
+    to_human = (
+        pedestrian_position[0] - robot_position[0],
+        pedestrian_position[1] - robot_position[1],
+    )
+    if hypot(*to_human) == 0.0 or hypot(*intended_motion) == 0.0:
+        return False
+
+    direction_dot = (
+        intended_motion[0] * to_human[0]
+        + intended_motion[1] * to_human[1]
+    )
+    return direction_dot < -tolerance
+
+
 def compute_directional_speed_scale(
     robot_position: Position,
     pedestrian_position: Position,

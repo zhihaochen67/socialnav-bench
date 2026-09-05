@@ -33,6 +33,11 @@ class EpisodeTrace:
     replan_steps: tuple[int, ...] = ()
     successful_replans: int = 0
     failed_replans: int = 0
+    recovery_count: int = 0
+    recovery_trigger_steps: tuple[int, ...] = ()
+    successful_recoveries: int = 0
+    failed_recoveries: int = 0
+    recovery_path_lengths: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,11 @@ class FailureDiagnostic:
     replan_steps: tuple[int, ...]
     successful_replans: int
     failed_replans: int
+    recovery_count: int
+    recovery_trigger_steps: tuple[int, ...]
+    successful_recoveries: int
+    failed_recoveries: int
+    recovery_path_lengths: tuple[int, ...]
 
 
 def _point_to_segment_distance(
@@ -348,4 +358,9 @@ def diagnose_failure(
         replan_steps=trace.replan_steps,
         successful_replans=trace.successful_replans,
         failed_replans=trace.failed_replans,
+        recovery_count=trace.recovery_count,
+        recovery_trigger_steps=trace.recovery_trigger_steps,
+        successful_recoveries=trace.successful_recoveries,
+        failed_recoveries=trace.failed_recoveries,
+        recovery_path_lengths=trace.recovery_path_lengths,
     )

@@ -28,13 +28,19 @@ from socialnav.benchmark import (  # noqa: E402
     generate_scenarios,
     run_episode_with_trace,
 )
-from socialnav.env.world import SIMULATION_STEP, STOP_DISTANCE  # noqa: E402
+from socialnav.env.world import (  # noqa: E402
+    SIMULATION_STEP,
+    SLOW_DISTANCE,
+    STOP_DISTANCE,
+)
+from socialnav.planners import CLEARANCE_EPSILON  # noqa: E402
 
 _SCENARIO_MODES = ("controlled", "diverse")
 _DIAGNOSTIC_METHODS = (
     "social",
     "social_replan",
     "social_replan_escape",
+    "social_replan_recovery",
 )
 _FAILURE_REASONS = (
     "pedestrian_blocking_path",
@@ -172,6 +178,22 @@ def _summarize(
             (diagnostic.replan_count for diagnostic in diagnostics),
             default=0,
         ),
+        "mean_recovery_count_among_failures": (
+            sum(diagnostic.recovery_count for diagnostic in diagnostics)
+            / failures
+            if failures
+            else None
+        ),
+        "max_recovery_count_among_failures": max(
+            (diagnostic.recovery_count for diagnostic in diagnostics),
+            default=0,
+        ),
+        "successful_recoveries": sum(
+            diagnostic.successful_recoveries for diagnostic in diagnostics
+        ),
+        "failed_recoveries": sum(
+            diagnostic.failed_recoveries for diagnostic in diagnostics
+        ),
         "failed_replanning_calls": sum(
             diagnostic.failed_replans for diagnostic in diagnostics
         ),
@@ -199,7 +221,9 @@ def _print_summary(
         else f"{mean_stopped:.3f}"
     )
 
-    if method == "social_replan_escape":
+    if method == "social_replan_recovery":
+        method_label = "Social Replan + Recovery"
+    elif method == "social_replan_escape":
         method_label = "Social Replan + Escape"
     elif method == "social_replan":
         method_label = "Social Replan"
@@ -236,6 +260,17 @@ def _print_summary(
     print(
         f"Failed replanning calls: {summary['failed_replanning_calls']}"
     )
+    mean_recoveries = summary["mean_recovery_count_among_failures"]
+    print(
+        "Mean recovery count among failures: "
+        f"{'-' if mean_recoveries is None else f'{mean_recoveries:.3f}'}"
+    )
+    print(
+        "Max recovery count among failures: "
+        f"{summary['max_recovery_count_among_failures']}"
+    )
+    print(f"Successful recoveries: {summary['successful_recoveries']}")
+    print(f"Failed recoveries: {summary['failed_recoveries']}")
     print(
         "Pedestrian blocking path (classified): "
         f"{counts['pedestrian_blocking_path']}"
@@ -295,6 +330,8 @@ def main() -> None:
             "max_episode_seconds": MAX_EPISODE_STEPS * SIMULATION_STEP,
             "path_near_threshold_metres": PATH_NEAR_THRESHOLD,
             "reactive_stop_distance_metres": STOP_DISTANCE,
+            "recovery_target_clearance_metres": SLOW_DISTANCE,
+            "recovery_clearance_epsilon": CLEARANCE_EPSILON,
             "stopped_speed_scale_tolerance": STOPPED_SPEED_TOLERANCE,
             "late_episode_fraction": LATE_EPISODE_FRACTION,
             "late_stopped_fraction_threshold": (

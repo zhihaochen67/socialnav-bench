@@ -28,6 +28,10 @@ from socialnav.env.world import (
 from socialnav.evaluation import EpisodeResult, evaluate_episode
 from socialnav.metrics import Position, compute_path_length
 from socialnav.planners.astar import astar
+from socialnav.planners.directional_avoidance import (
+    ESCAPE_SPEED_SCALE,
+    compute_directional_speed_scale,
+)
 from socialnav.planners.dynamic_avoidance import compute_speed_scale
 from socialnav.planners.social_planner import social_astar
 
@@ -40,7 +44,13 @@ from .replanning import (
 )
 from .scenario import Scenario, build_scenario_grid
 
-SUPPORTED_METHODS = ("astar", "dynamic", "social", "social_replan")
+SUPPORTED_METHODS = (
+    "astar",
+    "dynamic",
+    "social",
+    "social_replan",
+    "social_replan_escape",
+)
 MAX_EPISODE_SECONDS = 20.0
 MAX_EPISODE_STEPS = int(MAX_EPISODE_SECONDS / SIMULATION_STEP)
 
@@ -104,6 +114,20 @@ def _path_position(
     )
 
 
+def _next_motion_vector(
+    positions: list[Position],
+    progress: float,
+    current_position: Position,
+) -> Position:
+    """Return motion from the robot's actual position to its next route point."""
+    target_index = min(floor(progress) + 1, len(positions) - 1)
+    target = positions[target_index]
+    return (
+        target[0] - current_position[0],
+        target[1] - current_position[1],
+    )
+
+
 def _record_position(body_id: int, client_id: int) -> Position:
     position, _ = p.getBasePositionAndOrientation(
         body_id,
@@ -143,7 +167,10 @@ def run_episode_with_trace(
         )
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
-    if method == "social_replan" and replan_stop_steps <= 0:
+    if (
+        method in ("social_replan", "social_replan_escape")
+        and replan_stop_steps <= 0
+    ):
         raise ValueError("replan_stop_steps must be positive")
 
     grid_map = build_scenario_grid(scenario)
@@ -151,7 +178,7 @@ def run_episode_with_trace(
     if astar_path is None:
         raise ValueError("scenario goal must be reachable by A*")
 
-    if method in ("social", "social_replan"):
+    if method in ("social", "social_replan", "social_replan_escape"):
         selected_path = social_astar(
             grid_map,
             scenario.start,
@@ -218,7 +245,7 @@ def run_episode_with_trace(
         speed_scales: list[float] = []
         replan_policy = (
             SustainedStopReplanPolicy(replan_stop_steps)
-            if method == "social_replan"
+            if method in ("social_replan", "social_replan_escape")
             else None
         )
         replan_steps: list[int] = []
@@ -228,6 +255,20 @@ def run_episode_with_trace(
         while progress < last_position_index and steps < max_steps:
             if method == "astar":
                 speed_scale = 1.0
+            elif method == "social_replan_escape":
+                current_robot_position = robot_trajectory[-1]
+                speed_scale = compute_directional_speed_scale(
+                    current_robot_position,
+                    pedestrian.position,
+                    _next_motion_vector(
+                        path_positions,
+                        progress,
+                        current_robot_position,
+                    ),
+                    STOP_DISTANCE,
+                    SLOW_DISTANCE,
+                    ESCAPE_SPEED_SCALE,
+                )
             else:
                 speed_scale = compute_speed_scale(
                     robot_trajectory[-1],

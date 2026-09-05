@@ -249,10 +249,14 @@ def test_failure_analysis_cli_defaults_to_requested_configuration() -> None:
     assert args.method == "social"
 
 
-def test_failure_analysis_cli_accepts_social_replan() -> None:
-    args = build_parser().parse_args(["--method", "social_replan"])
+@pytest.mark.parametrize(
+    "method",
+    ("social_replan", "social_replan_escape"),
+)
+def test_failure_analysis_cli_accepts_replanning_methods(method: str) -> None:
+    args = build_parser().parse_args(["--method", method])
 
-    assert args.method == "social_replan"
+    assert args.method == method
 
 
 def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:

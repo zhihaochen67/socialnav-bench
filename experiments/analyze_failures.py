@@ -31,7 +31,11 @@ from socialnav.benchmark import (  # noqa: E402
 from socialnav.env.world import SIMULATION_STEP, STOP_DISTANCE  # noqa: E402
 
 _SCENARIO_MODES = ("controlled", "diverse")
-_DIAGNOSTIC_METHODS = ("social", "social_replan")
+_DIAGNOSTIC_METHODS = (
+    "social",
+    "social_replan",
+    "social_replan_escape",
+)
 _FAILURE_REASONS = (
     "pedestrian_blocking_path",
     "reactive_wait_timeout",
@@ -195,7 +199,12 @@ def _print_summary(
         else f"{mean_stopped:.3f}"
     )
 
-    method_label = "Social Replan" if method == "social_replan" else "Social"
+    if method == "social_replan_escape":
+        method_label = "Social Replan + Escape"
+    elif method == "social_replan":
+        method_label = "Social Replan"
+    else:
+        method_label = "Social"
     title = f"{method_label} Failure Analysis"
     print(title)
     print("-" * len(title))

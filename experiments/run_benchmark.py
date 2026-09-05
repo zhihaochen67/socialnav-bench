@@ -1,4 +1,4 @@
-"""Run the reproducible four-method SocialNav benchmark."""
+"""Run the reproducible five-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -26,12 +26,14 @@ from socialnav.benchmark import (  # noqa: E402
     run_episode_with_trace,
 )
 from socialnav.env.world import SIMULATION_STEP  # noqa: E402
+from socialnav.planners import ESCAPE_SPEED_SCALE  # noqa: E402
 
 _METHOD_LABELS = {
     "astar": "A*",
     "dynamic": "Dynamic",
     "social": "Social",
     "social_replan": "Social Replan",
+    "social_replan_escape": "Social Replan + Escape",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -49,17 +51,17 @@ def _format_optional(value: float | None) -> str:
 
 def _print_table(summaries: dict[str, MethodSummary]) -> None:
     print(
-        "Method         Success  Collision  SPL    PathLen  Time   "
+        "Method                  Success  Collision  SPL    PathLen  Time   "
         "MinHumanDist  SocialViolation"
     )
     print(
-        "-------------  -------  ---------  -----  -------  -----  "
+        "----------------------  -------  ---------  -----  -------  -----  "
         "------------  ---------------"
     )
     for method in SUPPORTED_METHODS:
         summary = summaries[method]
         print(
-            f"{_METHOD_LABELS[method]:<13}  "
+            f"{_METHOD_LABELS[method]:<22}  "
             f"{summary.success_rate:>7.3f}  "
             f"{summary.collision_rate:>9.3f}  "
             f"{summary.mean_spl:>5.3f}  "
@@ -140,12 +142,17 @@ def main() -> None:
             "max_episode_seconds": MAX_EPISODE_STEPS * SIMULATION_STEP,
             "replan_stop_seconds": REPLAN_STOP_SECONDS,
             "replan_stop_steps": REPLAN_STOP_STEPS,
+            "escape_speed_scale": ESCAPE_SPEED_SCALE,
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
                 "social": "social A* with reactive avoidance",
                 "social_replan": (
                     "social A* with reactive avoidance and online replanning"
+                ),
+                "social_replan_escape": (
+                    "social A* with online replanning and direction-aware "
+                    "reactive escape control"
                 ),
             },
         },

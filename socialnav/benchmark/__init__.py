@@ -26,6 +26,13 @@ from .runner import (
     run_episode,
     run_episode_with_trace,
 )
+from .replanning import (
+    REPLAN_STOP_SECONDS,
+    REPLAN_STOP_STEPS,
+    SustainedStopReplanPolicy,
+    interpolate_replanned_route,
+    world_to_nearest_free_cell,
+)
 from .scenario import (
     DIVERSE_MIN_PATH_MOVES,
     Scenario,
@@ -42,12 +49,15 @@ __all__ = [
     "LONGEST_STOPPED_FRACTION_THRESHOLD",
     "MAX_EPISODE_STEPS",
     "PATH_NEAR_THRESHOLD",
+    "REPLAN_STOP_SECONDS",
+    "REPLAN_STOP_STEPS",
     "STOPPED_SPEED_TOLERANCE",
     "SUPPORTED_METHODS",
     "EpisodeTrace",
     "FailureDiagnostic",
     "MethodSummary",
     "Scenario",
+    "SustainedStopReplanPolicy",
     "aggregate_results",
     "build_scenario_grid",
     "classify_failure",
@@ -56,6 +66,7 @@ __all__ = [
     "did_episode_time_out",
     "generate_diverse_scenarios",
     "generate_scenarios",
+    "interpolate_replanned_route",
     "is_point_on_or_near_route",
     "is_pedestrian_route_relevant",
     "late_stopped_fraction",
@@ -65,4 +76,5 @@ __all__ = [
     "run_episode",
     "run_episode_with_trace",
     "stopped_fraction",
+    "world_to_nearest_free_cell",
 ]

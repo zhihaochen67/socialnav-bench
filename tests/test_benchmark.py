@@ -1,12 +1,17 @@
 import pytest
 
+import socialnav.benchmark.runner as runner_module
 from experiments.run_benchmark import build_parser
 from socialnav.benchmark import (
+    SUPPORTED_METHODS,
+    Scenario,
     aggregate_results,
     generate_diverse_scenarios,
     generate_scenarios,
     run_episode,
+    run_episode_with_trace,
 )
+from socialnav.env.world import SIMULATION_STEP
 from socialnav.evaluation import EpisodeResult
 
 
@@ -106,7 +111,7 @@ def test_runner_rejects_unsupported_method() -> None:
         run_episode(scenario, "unknown")
 
 
-@pytest.mark.parametrize("method", ["astar", "dynamic", "social"])
+@pytest.mark.parametrize("method", SUPPORTED_METHODS)
 def test_runner_completes_headless_episode_for_each_method(method: str) -> None:
     scenario = generate_scenarios(1, seed=42)[0]
 
@@ -146,7 +151,7 @@ def test_runner_rejects_nonpositive_timeout() -> None:
         run_episode(scenario, "astar", max_steps=0)
 
 
-@pytest.mark.parametrize("method", ["astar", "dynamic", "social"])
+@pytest.mark.parametrize("method", SUPPORTED_METHODS)
 def test_runner_accepts_diverse_scenario(method: str) -> None:
     scenario = generate_diverse_scenarios(1, seed=42)[0]
 
@@ -172,3 +177,139 @@ def test_cli_accepts_supported_scenario_modes(mode: str) -> None:
 def test_cli_rejects_unknown_scenario_mode() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--scenario-mode", "unknown"])
+
+
+def _blocking_scenario() -> Scenario:
+    return Scenario(
+        scenario_id="online-replan-test",
+        grid_width=3,
+        grid_height=2,
+        obstacle_cells=(),
+        start=(0, 0),
+        goal=(2, 0),
+        grid_scale=1.0,
+        pedestrian_start=(0.25, 0.0),
+        pedestrian_target=(0.25, 1.0),
+        pedestrian_speed=1.0,
+    )
+
+
+def test_supported_method_order_includes_social_replan_last() -> None:
+    assert SUPPORTED_METHODS == (
+        "astar",
+        "dynamic",
+        "social",
+        "social_replan",
+    )
+
+
+@pytest.mark.parametrize("method", ("astar", "dynamic", "social"))
+def test_existing_methods_never_record_replans(method: str) -> None:
+    scenario = generate_scenarios(1, seed=42)[0]
+
+    _, trace = run_episode_with_trace(scenario, method, max_steps=1)
+
+    assert trace.replan_count == 0
+    assert trace.replan_steps == ()
+    assert trace.successful_replans == 0
+    assert trace.failed_replans == 0
+
+
+def test_social_replan_is_deterministic_on_repeated_runs() -> None:
+    scenario = generate_diverse_scenarios(1, seed=42)[0]
+
+    first = run_episode_with_trace(scenario, "social_replan")
+    second = run_episode_with_trace(scenario, "social_replan")
+
+    assert second == first
+
+
+def test_replan_uses_current_pedestrian_and_replaces_stale_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[int, int], tuple[tuple[float, float], ...]]] = []
+
+    def fake_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        *,
+        pedestrian_positions: list[tuple[float, float]],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]]:
+        calls.append((start, tuple(pedestrian_positions)))
+        if len(calls) == 1:
+            return [(0, 0), (1, 0), (2, 0)]
+        return [start, (0, 1), (1, 1), (2, 1), (2, 0)]
+
+    monkeypatch.setattr(runner_module, "social_astar", fake_social_astar)
+
+    _, trace = run_episode_with_trace(
+        _blocking_scenario(),
+        "social_replan",
+        max_steps=2,
+        replan_stop_steps=2,
+    )
+
+    assert len(calls) == 2
+    assert calls[0][1] == ((0.25, 0.0),)
+    assert calls[1][0] == (0, 0)
+    assert calls[1][1][0] == pytest.approx((0.25, SIMULATION_STEP))
+    assert trace.planned_path == (
+        (0.0, 0.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (2.0, 1.0),
+        (2.0, 0.0),
+    )
+    assert trace.replan_count == 1
+    assert trace.replan_steps == (2,)
+    assert trace.successful_replans == 1
+    assert trace.failed_replans == 0
+
+
+def test_failed_replan_retains_path_and_requires_fresh_stop_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_social_astar(
+        _grid_map: object,
+        _start: tuple[int, int],
+        _goal: tuple[int, int],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]] | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [(0, 0), (1, 0), (2, 0)]
+        return None
+
+    monkeypatch.setattr(runner_module, "social_astar", fake_social_astar)
+
+    result, trace = run_episode_with_trace(
+        _blocking_scenario(),
+        "social_replan",
+        max_steps=4,
+        replan_stop_steps=2,
+    )
+
+    assert result.steps == 4
+    assert trace.planned_path == (
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (2.0, 0.0),
+    )
+    assert trace.replan_count == 2
+    assert trace.replan_steps == (2, 4)
+    assert trace.successful_replans == 0
+    assert trace.failed_replans == 2
+
+
+def test_social_replan_rejects_nonpositive_stop_threshold() -> None:
+    with pytest.raises(ValueError, match="replan_stop_steps must be positive"):
+        run_episode(
+            _blocking_scenario(),
+            "social_replan",
+            replan_stop_steps=0,
+        )

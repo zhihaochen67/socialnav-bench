@@ -29,6 +29,10 @@ class EpisodeTrace:
     final_robot_position: Position
     final_pedestrian_position: Position
     max_steps: int
+    replan_count: int = 0
+    replan_steps: tuple[int, ...] = ()
+    successful_replans: int = 0
+    failed_replans: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,10 @@ class FailureDiagnostic:
     late_robot_stopped_fraction: float
     longest_consecutive_stop_steps: int
     likely_failure_reason: str
+    replan_count: int
+    replan_steps: tuple[int, ...]
+    successful_replans: int
+    failed_replans: int
 
 
 def _point_to_segment_distance(
@@ -336,4 +344,8 @@ def diagnose_failure(
         late_robot_stopped_fraction=late_stop_fraction,
         longest_consecutive_stop_steps=longest_stop_steps,
         likely_failure_reason=reason,
+        replan_count=trace.replan_count,
+        replan_steps=trace.replan_steps,
+        successful_replans=trace.successful_replans,
+        failed_replans=trace.failed_replans,
     )

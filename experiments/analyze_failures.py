@@ -31,6 +31,7 @@ from socialnav.benchmark import (  # noqa: E402
 from socialnav.env.world import SIMULATION_STEP, STOP_DISTANCE  # noqa: E402
 
 _SCENARIO_MODES = ("controlled", "diverse")
+_DIAGNOSTIC_METHODS = ("social", "social_replan")
 _FAILURE_REASONS = (
     "pedestrian_blocking_path",
     "reactive_wait_timeout",
@@ -60,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--episodes", type=_positive_int, default=100)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--method",
+        choices=_DIAGNOSTIC_METHODS,
+        default="social",
+    )
     parser.add_argument(
         "--scenario-mode",
         choices=_SCENARIO_MODES,
@@ -152,6 +158,19 @@ def _summarize(
             for diagnostic in diagnostics
         ),
         "mean_stopped_fraction": mean_stopped_fraction,
+        "mean_replan_count_among_failures": (
+            sum(diagnostic.replan_count for diagnostic in diagnostics)
+            / failures
+            if failures
+            else None
+        ),
+        "max_replan_count_among_failures": max(
+            (diagnostic.replan_count for diagnostic in diagnostics),
+            default=0,
+        ),
+        "failed_replanning_calls": sum(
+            diagnostic.failed_replans for diagnostic in diagnostics
+        ),
         "human_collision_failures": sum(
             diagnostic.human_collision for diagnostic in diagnostics
         ),
@@ -163,6 +182,7 @@ def _summarize(
 
 
 def _print_summary(
+    method: str,
     summary: dict[str, object],
     representatives: list[dict[str, str]],
 ) -> None:
@@ -175,8 +195,10 @@ def _print_summary(
         else f"{mean_stopped:.3f}"
     )
 
-    print("Social Failure Analysis")
-    print("-----------------------")
+    method_label = "Social Replan" if method == "social_replan" else "Social"
+    title = f"{method_label} Failure Analysis"
+    print(title)
+    print("-" * len(title))
     print(f"Episodes: {summary['episodes']}")
     print(f"Failures: {summary['failures']}")
     print(f"Timeouts: {summary['timeouts']}")
@@ -192,6 +214,18 @@ def _print_summary(
     print(
         "Mean stopped fraction among failures: "
         f"{mean_stopped_text}"
+    )
+    mean_replans = summary["mean_replan_count_among_failures"]
+    print(
+        "Mean replan count among failures: "
+        f"{'-' if mean_replans is None else f'{mean_replans:.3f}'}"
+    )
+    print(
+        "Max replan count among failures: "
+        f"{summary['max_replan_count_among_failures']}"
+    )
+    print(
+        f"Failed replanning calls: {summary['failed_replanning_calls']}"
     )
     print(
         "Pedestrian blocking path (classified): "
@@ -228,10 +262,10 @@ def main() -> None:
 
     diagnostics = []
     for scenario in scenarios:
-        result, trace = run_episode_with_trace(scenario, "social")
+        result, trace = run_episode_with_trace(scenario, args.method)
         diagnostic = diagnose_failure(
             scenario,
-            "social",
+            args.method,
             result,
             trace,
         )
@@ -246,7 +280,7 @@ def main() -> None:
             "episodes": args.episodes,
             "seed": args.seed,
             "scenario_mode": args.scenario_mode,
-            "method": "social",
+            "method": args.method,
             "simulation_dt": SIMULATION_STEP,
             "max_episode_steps": MAX_EPISODE_STEPS,
             "max_episode_seconds": MAX_EPISODE_STEPS * SIMULATION_STEP,
@@ -288,10 +322,18 @@ def main() -> None:
         "representative_scenarios": representatives,
     }
 
+    output_name = (
+        f"failure_analysis_{args.scenario_mode}_seed{args.seed}.json"
+        if args.method == "social"
+        else (
+            f"failure_analysis_{args.method}_{args.scenario_mode}_"
+            f"seed{args.seed}.json"
+        )
+    )
     output_path = (
         PROJECT_ROOT
         / "outputs"
-        / f"failure_analysis_{args.scenario_mode}_seed{args.seed}.json"
+        / output_name
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -299,7 +341,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    _print_summary(summary, representatives)
+    _print_summary(args.method, summary, representatives)
     elapsed = perf_counter() - started_at
     print(f"\nSaved: {output_path}")
     print(f"Runtime: {elapsed:.3f} s")

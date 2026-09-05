@@ -1,4 +1,4 @@
-"""Run the reproducible three-method SocialNav benchmark."""
+"""Run the reproducible four-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -14,13 +14,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from socialnav.benchmark import (  # noqa: E402
+    REPLAN_STOP_SECONDS,
+    REPLAN_STOP_STEPS,
+    EpisodeTrace,
     MAX_EPISODE_STEPS,
     MethodSummary,
     SUPPORTED_METHODS,
     aggregate_results,
     generate_diverse_scenarios,
     generate_scenarios,
-    run_episode,
+    run_episode_with_trace,
 )
 from socialnav.env.world import SIMULATION_STEP  # noqa: E402
 
@@ -28,6 +31,7 @@ _METHOD_LABELS = {
     "astar": "A*",
     "dynamic": "Dynamic",
     "social": "Social",
+    "social_replan": "Social Replan",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -45,17 +49,17 @@ def _format_optional(value: float | None) -> str:
 
 def _print_table(summaries: dict[str, MethodSummary]) -> None:
     print(
-        "Method    Success  Collision  SPL    PathLen  Time   "
+        "Method         Success  Collision  SPL    PathLen  Time   "
         "MinHumanDist  SocialViolation"
     )
     print(
-        "--------  -------  ---------  -----  -------  -----  "
+        "-------------  -------  ---------  -----  -------  -----  "
         "------------  ---------------"
     )
     for method in SUPPORTED_METHODS:
         summary = summaries[method]
         print(
-            f"{_METHOD_LABELS[method]:<8}  "
+            f"{_METHOD_LABELS[method]:<13}  "
             f"{summary.success_rate:>7.3f}  "
             f"{summary.collision_rate:>9.3f}  "
             f"{summary.mean_spl:>5.3f}  "
@@ -64,6 +68,19 @@ def _print_table(summaries: dict[str, MethodSummary]) -> None:
             f"{_format_optional(summary.mean_minimum_human_distance):>12}  "
             f"{summary.mean_social_violation_rate:>15.3f}"
         )
+
+
+def _summarize_replans(traces: list[EpisodeTrace]) -> dict[str, float | int]:
+    counts = [trace.replan_count for trace in traces]
+    return {
+        "total_replans": sum(counts),
+        "mean_replan_count": sum(counts) / len(counts),
+        "max_replan_count": max(counts),
+        "successful_replans": sum(
+            trace.successful_replans for trace in traces
+        ),
+        "failed_replans": sum(trace.failed_replans for trace in traces),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,12 +106,15 @@ def main() -> None:
     else:
         scenarios = generate_diverse_scenarios(args.episodes, args.seed)
     results_by_method = {method: [] for method in SUPPORTED_METHODS}
+    traces_by_method = {method: [] for method in SUPPORTED_METHODS}
 
     for scenario in scenarios:
         for method in SUPPORTED_METHODS:
-            results_by_method[method].append(
-                run_episode(scenario, method)
+            result, trace = run_episode_with_trace(
+                scenario, method
             )
+            results_by_method[method].append(result)
+            traces_by_method[method].append(trace)
 
     summaries = {
         method: aggregate_results(results)
@@ -118,24 +138,39 @@ def main() -> None:
             "simulation_dt": SIMULATION_STEP,
             "max_episode_steps": MAX_EPISODE_STEPS,
             "max_episode_seconds": MAX_EPISODE_STEPS * SIMULATION_STEP,
+            "replan_stop_seconds": REPLAN_STOP_SECONDS,
+            "replan_stop_steps": REPLAN_STOP_STEPS,
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
                 "social": "social A* with reactive avoidance",
+                "social_replan": (
+                    "social A* with reactive avoidance and online replanning"
+                ),
             },
         },
         "scenarios": [asdict(scenario) for scenario in scenarios],
         "methods": {
             method: {
                 "summary": asdict(summaries[method]),
+                "replanning": _summarize_replans(
+                    traces_by_method[method]
+                ),
                 "episodes": [
                     {
                         "scenario_id": scenario.scenario_id,
                         "result": asdict(result),
+                        "trace": {
+                            "replan_count": trace.replan_count,
+                            "replan_steps": list(trace.replan_steps),
+                            "successful_replans": trace.successful_replans,
+                            "failed_replans": trace.failed_replans,
+                        },
                     }
-                    for scenario, result in zip(
+                    for scenario, result, trace in zip(
                         scenarios,
                         results_by_method[method],
+                        traces_by_method[method],
                     )
                 ],
             }

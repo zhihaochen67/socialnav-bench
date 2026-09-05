@@ -32,9 +32,15 @@ from socialnav.planners.dynamic_avoidance import compute_speed_scale
 from socialnav.planners.social_planner import social_astar
 
 from .diagnostics import EpisodeTrace, did_episode_time_out
+from .replanning import (
+    REPLAN_STOP_STEPS,
+    SustainedStopReplanPolicy,
+    interpolate_replanned_route,
+    world_to_nearest_free_cell,
+)
 from .scenario import Scenario, build_scenario_grid
 
-SUPPORTED_METHODS = ("astar", "dynamic", "social")
+SUPPORTED_METHODS = ("astar", "dynamic", "social", "social_replan")
 MAX_EPISODE_SECONDS = 20.0
 MAX_EPISODE_STEPS = int(MAX_EPISODE_SECONDS / SIMULATION_STEP)
 
@@ -111,10 +117,14 @@ def run_episode(
     method: str,
     *,
     max_steps: int = MAX_EPISODE_STEPS,
+    replan_stop_steps: int = REPLAN_STOP_STEPS,
 ) -> EpisodeResult:
     """Run one deterministic benchmark episode in PyBullet DIRECT mode."""
     result, _ = run_episode_with_trace(
-        scenario, method, max_steps=max_steps
+        scenario,
+        method,
+        max_steps=max_steps,
+        replan_stop_steps=replan_stop_steps,
     )
     return result
 
@@ -124,6 +134,7 @@ def run_episode_with_trace(
     method: str,
     *,
     max_steps: int = MAX_EPISODE_STEPS,
+    replan_stop_steps: int = REPLAN_STOP_STEPS,
 ) -> tuple[EpisodeResult, EpisodeTrace]:
     """Run an episode and return metrics plus diagnostic runner state."""
     if method not in SUPPORTED_METHODS:
@@ -132,13 +143,15 @@ def run_episode_with_trace(
         )
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
+    if method == "social_replan" and replan_stop_steps <= 0:
+        raise ValueError("replan_stop_steps must be positive")
 
     grid_map = build_scenario_grid(scenario)
     astar_path = astar(grid_map, scenario.start, scenario.goal)
     if astar_path is None:
         raise ValueError("scenario goal must be reachable by A*")
 
-    if method == "social":
+    if method in ("social", "social_replan"):
         selected_path = social_astar(
             grid_map,
             scenario.start,
@@ -203,6 +216,14 @@ def run_episode_with_trace(
         last_position_index = len(path_positions) - 1
         steps = 0
         speed_scales: list[float] = []
+        replan_policy = (
+            SustainedStopReplanPolicy(replan_stop_steps)
+            if method == "social_replan"
+            else None
+        )
+        replan_steps: list[int] = []
+        successful_replans = 0
+        failed_replans = 0
 
         while progress < last_position_index and steps < max_steps:
             if method == "astar":
@@ -216,6 +237,37 @@ def run_episode_with_trace(
                 )
 
             speed_scales.append(speed_scale)
+            if replan_policy is not None and replan_policy.observe(speed_scale):
+                replan_steps.append(steps + 1)
+                current_robot_position = robot_trajectory[-1]
+                replan_start = world_to_nearest_free_cell(
+                    grid_map,
+                    current_robot_position,
+                    scenario.grid_scale,
+                )
+                replanned_path = social_astar(
+                    grid_map,
+                    replan_start,
+                    scenario.goal,
+                    pedestrian_positions=[pedestrian.position],
+                    social_distance=SOCIAL_DISTANCE,
+                    social_weight=SOCIAL_WEIGHT,
+                    grid_scale=scenario.grid_scale,
+                )
+                if replanned_path is None:
+                    failed_replans += 1
+                else:
+                    successful_replans += 1
+                    selected_path = replanned_path
+                    path_positions = interpolate_replanned_route(
+                        current_robot_position,
+                        selected_path,
+                        scenario.grid_scale,
+                        steps_per_cell=STEPS_PER_CELL,
+                    )
+                    progress = 0.0
+                    last_position_index = len(path_positions) - 1
+
             progress = min(
                 progress + speed_scale,
                 float(last_position_index),
@@ -276,6 +328,10 @@ def run_episode_with_trace(
             final_robot_position=robot_trajectory[-1],
             final_pedestrian_position=pedestrian_trajectory[-1],
             max_steps=max_steps,
+            replan_count=len(replan_steps),
+            replan_steps=tuple(replan_steps),
+            successful_replans=successful_replans,
+            failed_replans=failed_replans,
         )
         return result, trace
     finally:

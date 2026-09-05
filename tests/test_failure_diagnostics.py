@@ -246,3 +246,38 @@ def test_failure_analysis_cli_defaults_to_requested_configuration() -> None:
     assert args.episodes == 100
     assert args.seed == 42
     assert args.scenario_mode == "diverse"
+    assert args.method == "social"
+
+
+def test_failure_analysis_cli_accepts_social_replan() -> None:
+    args = build_parser().parse_args(["--method", "social_replan"])
+
+    assert args.method == "social_replan"
+
+
+def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:
+    trace = replace(
+        _trace(),
+        replan_count=3,
+        replan_steps=(10, 20, 30),
+        successful_replans=2,
+        failed_replans=1,
+    )
+
+    diagnostic = diagnose_failure(
+        _scenario(),
+        "social_replan",
+        _failed_result(),
+        trace,
+    )
+
+    assert diagnostic is not None
+    assert diagnostic.replan_count == 3
+    assert diagnostic.replan_steps == (10, 20, 30)
+    assert diagnostic.successful_replans == 2
+    assert diagnostic.failed_replans == 1
+
+    summary = _summarize(1, [diagnostic])
+    assert summary["mean_replan_count_among_failures"] == 3.0
+    assert summary["max_replan_count_among_failures"] == 3
+    assert summary["failed_replanning_calls"] == 1

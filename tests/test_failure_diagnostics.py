@@ -257,6 +257,8 @@ def test_failure_analysis_cli_defaults_to_requested_configuration() -> None:
         "social_replan_recovery",
         "social_predictive",
         "social_predictive_replan",
+        "social_spacetime",
+        "social_spacetime_replan",
     ),
 )
 def test_failure_analysis_cli_accepts_supported_social_methods(method: str) -> None:
@@ -277,6 +279,13 @@ def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:
         successful_recoveries=1,
         failed_recoveries=1,
         recovery_path_lengths=(2,),
+        planned_wait_actions=4,
+        executed_wait_actions=2,
+        planned_move_actions=5,
+        spacetime_plan_count=3,
+        spacetime_planning_failures=1,
+        total_intentional_wait_steps=180,
+        reactive_stopped_steps=7,
     )
 
     diagnostic = diagnose_failure(
@@ -296,6 +305,13 @@ def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:
     assert diagnostic.successful_recoveries == 1
     assert diagnostic.failed_recoveries == 1
     assert diagnostic.recovery_path_lengths == (2,)
+    assert diagnostic.planned_wait_actions == 4
+    assert diagnostic.executed_wait_actions == 2
+    assert diagnostic.planned_move_actions == 5
+    assert diagnostic.spacetime_plan_count == 3
+    assert diagnostic.spacetime_planning_failures == 1
+    assert diagnostic.total_intentional_wait_steps == 180
+    assert diagnostic.reactive_stopped_steps == 7
 
     summary = _summarize(1, [diagnostic])
     assert summary["mean_replan_count_among_failures"] == 3.0
@@ -305,3 +321,37 @@ def test_diagnostics_preserve_replan_trace_counts_and_steps() -> None:
     assert summary["max_recovery_count_among_failures"] == 2
     assert summary["successful_recoveries"] == 1
     assert summary["failed_recoveries"] == 1
+    assert summary["total_planned_wait_actions"] == 4
+    assert summary["total_executed_wait_actions"] == 2
+    assert summary["failures_using_intentional_wait"] == 1
+    assert summary["total_intentional_wait_steps"] == 180
+    assert summary["mean_intentional_wait_seconds_among_failures"] == 0.75
+    assert summary["total_reactive_stopped_steps"] == 7
+    assert summary["mean_spacetime_plan_count_among_failures"] == 3.0
+    assert summary["max_spacetime_plan_count_among_failures"] == 3
+    assert summary["planning_failures"] == 1
+    assert summary["episodes_with_planning_failure"] == 1
+
+
+def test_intentional_wait_is_not_classified_as_reactive_blocking() -> None:
+    trace = replace(
+        _trace(),
+        speed_scales=(1.0, 1.0, 1.0, 1.0),
+        planned_wait_actions=1,
+        executed_wait_actions=1,
+        total_intentional_wait_steps=4,
+        reactive_stopped_steps=0,
+    )
+
+    diagnostic = diagnose_failure(
+        _scenario(),
+        "social_spacetime",
+        _failed_result(),
+        trace,
+    )
+
+    assert diagnostic is not None
+    assert diagnostic.likely_failure_reason == "other"
+    assert diagnostic.robot_stopped_steps == 0
+    assert diagnostic.total_intentional_wait_steps == 4
+    assert diagnostic.reactive_stopped_steps == 0

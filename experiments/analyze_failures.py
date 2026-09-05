@@ -7,7 +7,7 @@ import json
 import sys
 from collections import Counter
 from dataclasses import asdict
-from math import ceil
+from math import ceil, floor
 from pathlib import Path
 from time import perf_counter
 
@@ -29,6 +29,7 @@ from socialnav.benchmark import (  # noqa: E402
     run_episode_with_trace,
 )
 from socialnav.env.world import (  # noqa: E402
+    ROBOT_SPEED,
     SIMULATION_STEP,
     SLOW_DISTANCE,
     STOP_DISTANCE,
@@ -37,6 +38,7 @@ from socialnav.planners import (  # noqa: E402
     CLEARANCE_EPSILON,
     PREDICTION_HORIZONS,
     PREDICTION_TEMPORAL_WEIGHTS,
+    duration_to_simulation_steps,
 )
 
 _SCENARIO_MODES = ("controlled", "diverse")
@@ -47,6 +49,8 @@ _DIAGNOSTIC_METHODS = (
     "social_replan_recovery",
     "social_predictive",
     "social_predictive_replan",
+    "social_spacetime",
+    "social_spacetime_replan",
 )
 _FAILURE_REASONS = (
     "pedestrian_blocking_path",
@@ -200,6 +204,53 @@ def _summarize(
         "failed_recoveries": sum(
             diagnostic.failed_recoveries for diagnostic in diagnostics
         ),
+        "total_planned_wait_actions": sum(
+            diagnostic.planned_wait_actions for diagnostic in diagnostics
+        ),
+        "mean_planned_wait_actions_among_failures": (
+            sum(
+                diagnostic.planned_wait_actions
+                for diagnostic in diagnostics
+            )
+            / failures
+            if failures
+            else None
+        ),
+        "total_executed_wait_actions": sum(
+            diagnostic.executed_wait_actions for diagnostic in diagnostics
+        ),
+        "failures_using_intentional_wait": sum(
+            diagnostic.executed_wait_actions > 0
+            for diagnostic in diagnostics
+        ),
+        "total_intentional_wait_steps": sum(
+            diagnostic.total_intentional_wait_steps
+            for diagnostic in diagnostics
+        ),
+        "mean_intentional_wait_seconds_among_failures": (
+            sum(
+                diagnostic.total_intentional_wait_steps
+                for diagnostic in diagnostics
+            )
+            * SIMULATION_STEP
+            / failures
+            if failures
+            else None
+        ),
+        "total_reactive_stopped_steps": sum(
+            diagnostic.reactive_stopped_steps
+            for diagnostic in diagnostics
+        ),
+        "mean_spacetime_plan_count_among_failures": (
+            sum(diagnostic.spacetime_plan_count for diagnostic in diagnostics)
+            / failures
+            if failures
+            else None
+        ),
+        "max_spacetime_plan_count_among_failures": max(
+            (diagnostic.spacetime_plan_count for diagnostic in diagnostics),
+            default=0,
+        ),
         "failed_replanning_calls": sum(
             diagnostic.failed_replans for diagnostic in diagnostics
         ),
@@ -209,7 +260,14 @@ def _summarize(
         "obstacle_collision_failures": sum(
             diagnostic.obstacle_collision for diagnostic in diagnostics
         ),
-        "planning_failures": 0,
+        "planning_failures": sum(
+            diagnostic.spacetime_planning_failures
+            for diagnostic in diagnostics
+        ),
+        "episodes_with_planning_failure": sum(
+            diagnostic.spacetime_planning_failures > 0
+            for diagnostic in diagnostics
+        ),
     }
 
 
@@ -227,7 +285,11 @@ def _print_summary(
         else f"{mean_stopped:.3f}"
     )
 
-    if method == "social_predictive_replan":
+    if method == "social_spacetime_replan":
+        method_label = "Space-Time Social Replan"
+    elif method == "social_spacetime":
+        method_label = "Space-Time Social"
+    elif method == "social_predictive_replan":
         method_label = "Predictive Social Replan"
     elif method == "social_predictive":
         method_label = "Predictive Social"
@@ -281,6 +343,40 @@ def _print_summary(
     )
     print(f"Successful recoveries: {summary['successful_recoveries']}")
     print(f"Failed recoveries: {summary['failed_recoveries']}")
+    mean_wait_seconds = summary[
+        "mean_intentional_wait_seconds_among_failures"
+    ]
+    mean_plan_count = summary[
+        "mean_spacetime_plan_count_among_failures"
+    ]
+    print(
+        "Total planned WAIT actions among failures: "
+        f"{summary['total_planned_wait_actions']}"
+    )
+    print(
+        "Total executed WAIT actions among failures: "
+        f"{summary['total_executed_wait_actions']}"
+    )
+    print(
+        "Failures using intentional WAIT: "
+        f"{summary['failures_using_intentional_wait']}"
+    )
+    print(
+        "Mean intentional wait seconds among failures: "
+        f"{'-' if mean_wait_seconds is None else f'{mean_wait_seconds:.3f}'}"
+    )
+    print(
+        "Total reactive stopped steps among failures: "
+        f"{summary['total_reactive_stopped_steps']}"
+    )
+    print(
+        "Mean space-time plan count among failures: "
+        f"{'-' if mean_plan_count is None else f'{mean_plan_count:.3f}'}"
+    )
+    print(
+        "Max space-time plan count among failures: "
+        f"{summary['max_spacetime_plan_count_among_failures']}"
+    )
     print(
         "Pedestrian blocking path (classified): "
         f"{counts['pedestrian_blocking_path']}"
@@ -290,6 +386,10 @@ def _print_summary(
     print(f"Goal not reached: {counts['goal_not_reached']}")
     print(f"Other: {counts['other']}")
     print(f"Planning failures: {summary['planning_failures']}")
+    print(
+        "Episodes with planning failure: "
+        f"{summary['episodes_with_planning_failure']}"
+    )
     print(
         "Obstacle collision failures: "
         f"{summary['obstacle_collision_failures']}"
@@ -313,6 +413,7 @@ def main() -> None:
         scenarios = generate_scenarios(args.episodes, args.seed)
     else:
         scenarios = generate_diverse_scenarios(args.episodes, args.seed)
+    spacetime_move_duration = scenarios[0].grid_scale / ROBOT_SPEED
 
     diagnostics = []
     for scenario in scenarios:
@@ -344,6 +445,20 @@ def main() -> None:
             "recovery_clearance_epsilon": CLEARANCE_EPSILON,
             "prediction_horizons_seconds": list(PREDICTION_HORIZONS),
             "prediction_temporal_weights": list(PREDICTION_TEMPORAL_WEIGHTS),
+            "robot_speed": ROBOT_SPEED,
+            "spacetime_move_duration_rule": "grid_scale / robot_speed",
+            "spacetime_move_duration_seconds": spacetime_move_duration,
+            "spacetime_wait_duration_seconds": spacetime_move_duration,
+            "spacetime_action_steps": duration_to_simulation_steps(
+                spacetime_move_duration,
+                SIMULATION_STEP,
+            ),
+            "spacetime_action_step_rounding": (
+                "nearest integer; exact ties round upward"
+            ),
+            "spacetime_max_time_index": floor(
+                MAX_EPISODE_STEPS * SIMULATION_STEP / spacetime_move_duration
+            ),
             "stopped_speed_scale_tolerance": STOPPED_SPEED_TOLERANCE,
             "late_episode_fraction": LATE_EPISODE_FRACTION,
             "late_stopped_fraction_threshold": (

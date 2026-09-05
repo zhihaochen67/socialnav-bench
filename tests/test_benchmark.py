@@ -1,6 +1,7 @@
 import pytest
 
 import socialnav.benchmark.runner as runner_module
+import socialnav.benchmark.space_time_runner as space_time_runner_module
 from experiments.run_benchmark import build_parser
 from socialnav.benchmark import (
     SUPPORTED_METHODS,
@@ -13,6 +14,7 @@ from socialnav.benchmark import (
 )
 from socialnav.env.world import SIMULATION_STEP, SLOW_DISTANCE
 from socialnav.evaluation import EpisodeResult
+from socialnav.planners import SpaceTimePlan
 
 
 def _result(
@@ -194,7 +196,7 @@ def _blocking_scenario() -> Scenario:
     )
 
 
-def test_supported_method_order_includes_predictive_methods_last() -> None:
+def test_supported_method_order_includes_space_time_methods_last() -> None:
     assert SUPPORTED_METHODS == (
         "astar",
         "dynamic",
@@ -204,6 +206,8 @@ def test_supported_method_order_includes_predictive_methods_last() -> None:
         "social_replan_recovery",
         "social_predictive",
         "social_predictive_replan",
+        "social_spacetime",
+        "social_spacetime_replan",
     )
 
 
@@ -320,6 +324,7 @@ def test_failed_replan_retains_path_and_requires_fresh_stop_interval(
         "social_replan_escape",
         "social_replan_recovery",
         "social_predictive_replan",
+        "social_spacetime_replan",
     ),
 )
 def test_replanning_methods_reject_nonpositive_stop_threshold(method: str) -> None:
@@ -817,6 +822,268 @@ def test_failed_predictive_replan_retains_path_and_retries_deterministically(
     ("social_predictive", "social_predictive_replan"),
 )
 def test_predictive_methods_are_deterministic(method: str) -> None:
+    scenario = generate_diverse_scenarios(1, seed=42)[0]
+
+    first = run_episode_with_trace(scenario, method)
+    second = run_episode_with_trace(scenario, method)
+
+    assert second == first
+
+
+def _space_time_runner_scenario(
+    *,
+    pedestrian_start: tuple[float, float] = (10.0, 10.0),
+    pedestrian_target: tuple[float, float] = (10.0, 10.0),
+    pedestrian_speed: float = 0.0,
+) -> Scenario:
+    return Scenario(
+        scenario_id="space-time-runner-test",
+        grid_width=2,
+        grid_height=1,
+        obstacle_cells=(),
+        start=(0, 0),
+        goal=(1, 0),
+        grid_scale=0.75,
+        pedestrian_start=pedestrian_start,
+        pedestrian_target=pedestrian_target,
+        pedestrian_speed=pedestrian_speed,
+    )
+
+
+def _space_time_plan(
+    timed_states: tuple[tuple[int, int, int], ...],
+    actions: tuple[str, ...],
+) -> SpaceTimePlan:
+    wait_actions = actions.count("WAIT")
+    return SpaceTimePlan(
+        spatial_path=tuple((state[0], state[1]) for state in timed_states),
+        timed_states=timed_states,
+        actions=actions,
+        planned_wait_actions=wait_actions,
+        planned_move_actions=len(actions) - wait_actions,
+        move_duration=0.375,
+        estimated_duration=len(actions) * 0.375,
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    (
+        "astar",
+        "dynamic",
+        "social",
+        "social_replan",
+        "social_replan_escape",
+        "social_replan_recovery",
+        "social_predictive",
+        "social_predictive_replan",
+    ),
+)
+def test_existing_eight_methods_do_not_dispatch_to_space_time_runner(
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = generate_scenarios(1, seed=42)[0]
+    expected = run_episode_with_trace(scenario, method, max_steps=1)
+
+    def unexpected_space_time_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        pytest.fail("existing method dispatched to space-time runner")
+
+    monkeypatch.setattr(
+        runner_module,
+        "run_space_time_episode_with_trace",
+        unexpected_space_time_call,
+    )
+
+    actual = run_episode_with_trace(scenario, method, max_steps=1)
+
+    assert actual == expected
+
+
+def test_planned_wait_executes_for_exact_duration_without_reactive_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _space_time_plan(
+        ((0, 0, 0), (0, 0, 1), (1, 0, 2)),
+        ("WAIT", "RIGHT"),
+    )
+    monkeypatch.setattr(
+        space_time_runner_module,
+        "space_time_social_astar",
+        lambda *_args, **_kwargs: plan,
+    )
+
+    result, trace = run_episode_with_trace(
+        _space_time_runner_scenario(),
+        "social_spacetime_replan",
+        max_steps=90,
+        replan_stop_steps=1,
+    )
+
+    assert result.steps == 90
+    assert trace.planned_wait_actions == 1
+    assert trace.executed_wait_actions == 1
+    assert trace.planned_move_actions == 1
+    assert trace.total_intentional_wait_steps == 90
+    assert trace.reactive_stopped_steps == 0
+    assert trace.replan_count == 0
+    assert trace.speed_scales == (1.0,) * 90
+
+
+def test_reactive_block_uses_current_pedestrian_state_and_triggers_replan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[
+        tuple[
+            tuple[int, int],
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float] | None,
+        ]
+    ] = []
+    plan = _space_time_plan(
+        ((0, 0, 0), (1, 0, 1)),
+        ("RIGHT",),
+    )
+
+    def fake_space_time_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        pedestrian_position: tuple[float, float],
+        pedestrian_velocity: tuple[float, float],
+        pedestrian_target: tuple[float, float] | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> SpaceTimePlan:
+        calls.append(
+            (
+                start,
+                pedestrian_position,
+                pedestrian_velocity,
+                pedestrian_target,
+            )
+        )
+        return plan
+
+    monkeypatch.setattr(
+        space_time_runner_module,
+        "space_time_social_astar",
+        fake_space_time_social_astar,
+    )
+    scenario = _space_time_runner_scenario(
+        pedestrian_start=(0.25, 0.0),
+        pedestrian_target=(0.25, 1.0),
+        pedestrian_speed=1.0,
+    )
+
+    _, trace = run_episode_with_trace(
+        scenario,
+        "social_spacetime_replan",
+        max_steps=2,
+        replan_stop_steps=2,
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == (
+        (0, 0),
+        (0.25, 0.0),
+        (0.0, 1.0),
+        (0.25, 1.0),
+    )
+    assert calls[1][0] == (0, 0)
+    assert calls[1][1] == pytest.approx((0.25, SIMULATION_STEP))
+    assert calls[1][2] == pytest.approx((0.0, 1.0))
+    assert calls[1][3] == (0.25, 1.0)
+    assert trace.replan_count == 1
+    assert trace.replan_steps == (2,)
+    assert trace.successful_replans == 1
+    assert trace.failed_replans == 0
+    assert trace.spacetime_plan_count == 2
+    assert trace.spacetime_planning_failures == 0
+    assert trace.reactive_stopped_steps == 2
+    assert trace.total_intentional_wait_steps == 0
+
+
+def test_failed_initial_space_time_plan_is_safe_and_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        space_time_runner_module,
+        "space_time_social_astar",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result, trace = run_episode_with_trace(
+        _space_time_runner_scenario(),
+        "social_spacetime",
+        max_steps=3,
+    )
+
+    assert not result.success
+    assert result.steps == 3
+    assert trace.timed_out
+    assert trace.spacetime_plan_count == 1
+    assert trace.spacetime_planning_failures == 1
+    assert trace.planned_wait_actions == 0
+    assert trace.executed_wait_actions == 0
+    assert trace.total_intentional_wait_steps == 0
+    assert trace.reactive_stopped_steps == 0
+    assert trace.speed_scales == (1.0, 1.0, 1.0)
+
+
+def test_failed_space_time_replan_retains_plan_and_retries_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    plan = _space_time_plan(
+        ((0, 0, 0), (1, 0, 1)),
+        ("RIGHT",),
+    )
+
+    def fake_space_time_social_astar(
+        *_args: object,
+        **_kwargs: object,
+    ) -> SpaceTimePlan | None:
+        nonlocal calls
+        calls += 1
+        return plan if calls == 1 else None
+
+    monkeypatch.setattr(
+        space_time_runner_module,
+        "space_time_social_astar",
+        fake_space_time_social_astar,
+    )
+
+    _, trace = run_episode_with_trace(
+        _space_time_runner_scenario(
+            pedestrian_start=(0.25, 0.0),
+            pedestrian_target=(0.25, 0.0),
+        ),
+        "social_spacetime_replan",
+        max_steps=4,
+        replan_stop_steps=2,
+    )
+
+    assert calls == 3
+    assert trace.planned_path == ((0.0, 0.0), (0.75, 0.0))
+    assert trace.replan_count == 2
+    assert trace.replan_steps == (2, 4)
+    assert trace.successful_replans == 0
+    assert trace.failed_replans == 2
+    assert trace.spacetime_plan_count == 3
+    assert trace.spacetime_planning_failures == 2
+    assert trace.reactive_stopped_steps == 4
+
+
+@pytest.mark.parametrize(
+    "method",
+    ("social_spacetime", "social_spacetime_replan"),
+)
+def test_space_time_methods_are_deterministic(method: str) -> None:
     scenario = generate_diverse_scenarios(1, seed=42)[0]
 
     first = run_episode_with_trace(scenario, method)

@@ -18,9 +18,17 @@ from .pedestrian_prediction import (
     PREDICTION_HORIZONS,
     PREDICTION_TEMPORAL_WEIGHTS,
     compute_predictive_social_cost,
+    predict_pedestrian_position_at_time,
     predict_pedestrian_positions,
 )
 from .predictive_social_planner import predictive_social_astar
+from .space_time_planner import (
+    SpaceTimePlan,
+    compute_time_aligned_social_cost,
+    duration_to_simulation_steps,
+    is_space_time_action_safe,
+    space_time_social_astar,
+)
 from .social_cost import compute_social_cost
 from .social_planner import social_astar
 
@@ -31,15 +39,21 @@ __all__ = [
     "PREDICTION_EPSILON",
     "PREDICTION_HORIZONS",
     "PREDICTION_TEMPORAL_WEIGHTS",
+    "SpaceTimePlan",
     "astar",
     "compute_directional_speed_scale",
     "compute_predictive_social_cost",
+    "compute_time_aligned_social_cost",
     "compute_social_cost",
     "compute_speed_scale",
+    "duration_to_simulation_steps",
     "find_clearance_recovery_path",
     "is_clearance_safe_motion",
     "is_separation_increasing",
+    "is_space_time_action_safe",
+    "predict_pedestrian_position_at_time",
     "predict_pedestrian_positions",
     "predictive_social_astar",
     "social_astar",
+    "space_time_social_astar",
 ]

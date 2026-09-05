@@ -1,4 +1,4 @@
-"""Run the reproducible eight-method SocialNav benchmark."""
+"""Run the reproducible ten-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from math import floor
 from pathlib import Path
 from time import perf_counter
 
@@ -25,11 +26,18 @@ from socialnav.benchmark import (  # noqa: E402
     generate_scenarios,
     run_episode_with_trace,
 )
-from socialnav.env.world import SIMULATION_STEP, SLOW_DISTANCE  # noqa: E402
+from socialnav.env.world import (  # noqa: E402
+    HUMAN_COLLISION_DISTANCE,
+    ROBOT_SPEED,
+    SIMULATION_STEP,
+    SLOW_DISTANCE,
+)
+from socialnav.evaluation import EpisodeResult  # noqa: E402
 from socialnav.planners import (  # noqa: E402
     ESCAPE_SPEED_SCALE,
     PREDICTION_HORIZONS,
     PREDICTION_TEMPORAL_WEIGHTS,
+    duration_to_simulation_steps,
 )
 
 _METHOD_LABELS = {
@@ -41,6 +49,8 @@ _METHOD_LABELS = {
     "social_replan_recovery": "Social Replan + Recovery",
     "social_predictive": "Predictive Social",
     "social_predictive_replan": "Predictive Social Replan",
+    "social_spacetime": "Space-Time Social",
+    "social_spacetime_replan": "Space-Time Social Replan",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -120,6 +130,50 @@ def _summarize_recoveries(
     }
 
 
+def _summarize_spacetime(
+    results: list[EpisodeResult],
+    traces: list[EpisodeTrace],
+) -> dict[str, float | int]:
+    planned_waits = [trace.planned_wait_actions for trace in traces]
+    executed_waits = [trace.executed_wait_actions for trace in traces]
+    plan_counts = [trace.spacetime_plan_count for trace in traces]
+    episodes_using_wait = [count > 0 for count in executed_waits]
+    return {
+        "total_planned_wait_actions": sum(planned_waits),
+        "mean_planned_wait_actions": sum(planned_waits) / len(traces),
+        "total_executed_wait_actions": sum(executed_waits),
+        "mean_executed_wait_actions": sum(executed_waits) / len(traces),
+        "successful_episodes_using_wait": sum(
+            result.success and used_wait
+            for result, used_wait in zip(results, episodes_using_wait)
+        ),
+        "failed_episodes_using_wait": sum(
+            not result.success and used_wait
+            for result, used_wait in zip(results, episodes_using_wait)
+        ),
+        "total_intentional_wait_steps": sum(
+            trace.total_intentional_wait_steps for trace in traces
+        ),
+        "mean_intentional_wait_seconds": (
+            sum(trace.total_intentional_wait_steps for trace in traces)
+            * SIMULATION_STEP
+            / len(traces)
+        ),
+        "mean_spacetime_plan_count": sum(plan_counts) / len(traces),
+        "max_spacetime_plan_count": max(plan_counts),
+        "spacetime_planning_failures": sum(
+            trace.spacetime_planning_failures for trace in traces
+        ),
+        "total_reactive_stopped_steps": sum(
+            trace.reactive_stopped_steps for trace in traces
+        ),
+        "mean_reactive_stopped_steps": sum(
+            trace.reactive_stopped_steps for trace in traces
+        )
+        / len(traces),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the deterministic SocialNav headless benchmark."
@@ -142,6 +196,7 @@ def main() -> None:
         scenarios = generate_scenarios(args.episodes, args.seed)
     else:
         scenarios = generate_diverse_scenarios(args.episodes, args.seed)
+    spacetime_move_duration = scenarios[0].grid_scale / ROBOT_SPEED
     results_by_method = {method: [] for method in SUPPORTED_METHODS}
     traces_by_method = {method: [] for method in SUPPORTED_METHODS}
 
@@ -181,6 +236,23 @@ def main() -> None:
             "recovery_target_clearance": SLOW_DISTANCE,
             "prediction_horizons": list(PREDICTION_HORIZONS),
             "prediction_temporal_weights": list(PREDICTION_TEMPORAL_WEIGHTS),
+            "robot_speed": ROBOT_SPEED,
+            "human_collision_distance": HUMAN_COLLISION_DISTANCE,
+            "spacetime_move_duration_rule": "grid_scale / robot_speed",
+            "spacetime_move_duration_seconds": spacetime_move_duration,
+            "spacetime_wait_duration_seconds": spacetime_move_duration,
+            "spacetime_action_steps": duration_to_simulation_steps(
+                spacetime_move_duration,
+                SIMULATION_STEP,
+            ),
+            "spacetime_action_step_rounding": (
+                "nearest integer; exact ties round upward"
+            ),
+            "spacetime_max_time_index": floor(
+                MAX_EPISODE_STEPS
+                * SIMULATION_STEP
+                / spacetime_move_duration
+            ),
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
@@ -203,6 +275,14 @@ def main() -> None:
                     "predictive social A* with reactive avoidance and "
                     "online replanning using current pedestrian velocity"
                 ),
+                "social_spacetime": (
+                    "time-expanded social A* with explicit MOVE/WAIT actions "
+                    "and reactive movement safety"
+                ),
+                "social_spacetime_replan": (
+                    "time-expanded social A* with explicit MOVE/WAIT actions, "
+                    "reactive movement safety, and sustained-stop replanning"
+                ),
             },
         },
         "scenarios": [asdict(scenario) for scenario in scenarios],
@@ -214,6 +294,10 @@ def main() -> None:
                 ),
                 "recovery": _summarize_recoveries(
                     traces_by_method[method]
+                ),
+                "spacetime": _summarize_spacetime(
+                    results_by_method[method],
+                    traces_by_method[method],
                 ),
                 "episodes": [
                     {
@@ -236,6 +320,27 @@ def main() -> None:
                             ),
                             "recovery_path_lengths": list(
                                 trace.recovery_path_lengths
+                            ),
+                            "planned_wait_actions": (
+                                trace.planned_wait_actions
+                            ),
+                            "executed_wait_actions": (
+                                trace.executed_wait_actions
+                            ),
+                            "planned_move_actions": (
+                                trace.planned_move_actions
+                            ),
+                            "spacetime_plan_count": (
+                                trace.spacetime_plan_count
+                            ),
+                            "spacetime_planning_failures": (
+                                trace.spacetime_planning_failures
+                            ),
+                            "total_intentional_wait_steps": (
+                                trace.total_intentional_wait_steps
+                            ),
+                            "reactive_stopped_steps": (
+                                trace.reactive_stopped_steps
                             ),
                         },
                     }

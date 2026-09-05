@@ -38,6 +38,13 @@ class EpisodeTrace:
     successful_recoveries: int = 0
     failed_recoveries: int = 0
     recovery_path_lengths: tuple[int, ...] = ()
+    planned_wait_actions: int = 0
+    executed_wait_actions: int = 0
+    planned_move_actions: int = 0
+    spacetime_plan_count: int = 0
+    spacetime_planning_failures: int = 0
+    total_intentional_wait_steps: int = 0
+    reactive_stopped_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,13 @@ class FailureDiagnostic:
     successful_recoveries: int
     failed_recoveries: int
     recovery_path_lengths: tuple[int, ...]
+    planned_wait_actions: int
+    executed_wait_actions: int
+    planned_move_actions: int
+    spacetime_plan_count: int
+    spacetime_planning_failures: int
+    total_intentional_wait_steps: int
+    reactive_stopped_steps: int
 
 
 def _point_to_segment_distance(
@@ -363,4 +377,11 @@ def diagnose_failure(
         successful_recoveries=trace.successful_recoveries,
         failed_recoveries=trace.failed_recoveries,
         recovery_path_lengths=trace.recovery_path_lengths,
+        planned_wait_actions=trace.planned_wait_actions,
+        executed_wait_actions=trace.executed_wait_actions,
+        planned_move_actions=trace.planned_move_actions,
+        spacetime_plan_count=trace.spacetime_plan_count,
+        spacetime_planning_failures=trace.spacetime_planning_failures,
+        total_intentional_wait_steps=trace.total_intentional_wait_steps,
+        reactive_stopped_steps=trace.reactive_stopped_steps,
     )

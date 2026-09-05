@@ -6,6 +6,7 @@ from socialnav.planners.pedestrian_prediction import (
     PREDICTION_HORIZONS,
     PREDICTION_TEMPORAL_WEIGHTS,
     compute_predictive_social_cost,
+    predict_pedestrian_position_at_time,
     predict_pedestrian_positions,
 )
 from socialnav.planners.social_cost import compute_social_cost
@@ -147,3 +148,70 @@ def test_zero_velocity_represents_persistent_decayed_occupancy() -> None:
         base_cost * sum(PREDICTION_TEMPORAL_WEIGHTS)
     )
     assert hypot(*predictions[-1]) == pytest.approx(0.5)
+
+
+def test_arbitrary_time_prediction_at_zero() -> None:
+    position = predict_pedestrian_position_at_time(
+        (1.0, 2.0),
+        (0.5, -0.25),
+        0.0,
+    )
+
+    assert position == (1.0, 2.0)
+
+
+def test_arbitrary_time_prediction_at_fractional_time() -> None:
+    position = predict_pedestrian_position_at_time(
+        (1.0, 2.0),
+        (0.5, -0.25),
+        0.3,
+    )
+
+    assert position == pytest.approx((1.15, 1.925))
+
+
+def test_arbitrary_time_prediction_clamps_exact_target_arrival() -> None:
+    position = predict_pedestrian_position_at_time(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        0.75,
+        target=(0.75, 0.0),
+    )
+
+    assert position == (0.75, 0.0)
+
+
+def test_arbitrary_time_prediction_clamps_beyond_target() -> None:
+    position = predict_pedestrian_position_at_time(
+        (0.0, 0.0),
+        (1.0, 0.0),
+        2.0,
+        target=(0.75, 0.0),
+    )
+
+    assert position == (0.75, 0.0)
+
+
+def test_arbitrary_time_prediction_with_zero_velocity() -> None:
+    position = predict_pedestrian_position_at_time(
+        (2.0, 3.0),
+        (0.0, 0.0),
+        100.0,
+        target=(4.0, 3.0),
+    )
+
+    assert position == (2.0, 3.0)
+
+
+def test_arbitrary_time_prediction_is_deterministic() -> None:
+    positions = [
+        predict_pedestrian_position_at_time(
+            (0.25, 0.75),
+            (0.5, -0.25),
+            1.125,
+            target=(2.5, -0.375),
+        )
+        for _ in range(10)
+    ]
+
+    assert positions == [positions[0]] * 10

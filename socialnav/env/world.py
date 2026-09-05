@@ -29,6 +29,7 @@ from socialnav.planners.dynamic_avoidance import compute_speed_scale
 from socialnav.planners.social_planner import social_astar
 
 SIMULATION_STEP = 1.0 / 240.0
+ROBOT_SPEED = 2.0
 STEPS_PER_CELL = 90
 ROBOT_RADIUS = 0.18
 ROBOT_HEIGHT = 0.20

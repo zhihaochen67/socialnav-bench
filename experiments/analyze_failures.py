@@ -33,7 +33,11 @@ from socialnav.env.world import (  # noqa: E402
     SLOW_DISTANCE,
     STOP_DISTANCE,
 )
-from socialnav.planners import CLEARANCE_EPSILON  # noqa: E402
+from socialnav.planners import (  # noqa: E402
+    CLEARANCE_EPSILON,
+    PREDICTION_HORIZONS,
+    PREDICTION_TEMPORAL_WEIGHTS,
+)
 
 _SCENARIO_MODES = ("controlled", "diverse")
 _DIAGNOSTIC_METHODS = (
@@ -41,6 +45,8 @@ _DIAGNOSTIC_METHODS = (
     "social_replan",
     "social_replan_escape",
     "social_replan_recovery",
+    "social_predictive",
+    "social_predictive_replan",
 )
 _FAILURE_REASONS = (
     "pedestrian_blocking_path",
@@ -221,7 +227,11 @@ def _print_summary(
         else f"{mean_stopped:.3f}"
     )
 
-    if method == "social_replan_recovery":
+    if method == "social_predictive_replan":
+        method_label = "Predictive Social Replan"
+    elif method == "social_predictive":
+        method_label = "Predictive Social"
+    elif method == "social_replan_recovery":
         method_label = "Social Replan + Recovery"
     elif method == "social_replan_escape":
         method_label = "Social Replan + Escape"
@@ -332,6 +342,8 @@ def main() -> None:
             "reactive_stop_distance_metres": STOP_DISTANCE,
             "recovery_target_clearance_metres": SLOW_DISTANCE,
             "recovery_clearance_epsilon": CLEARANCE_EPSILON,
+            "prediction_horizons_seconds": list(PREDICTION_HORIZONS),
+            "prediction_temporal_weights": list(PREDICTION_TEMPORAL_WEIGHTS),
             "stopped_speed_scale_tolerance": STOPPED_SPEED_TOLERANCE,
             "late_episode_fraction": LATE_EPISODE_FRACTION,
             "late_stopped_fraction_threshold": (

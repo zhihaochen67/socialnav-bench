@@ -194,7 +194,7 @@ def _blocking_scenario() -> Scenario:
     )
 
 
-def test_supported_method_order_includes_recovery_method_last() -> None:
+def test_supported_method_order_includes_predictive_methods_last() -> None:
     assert SUPPORTED_METHODS == (
         "astar",
         "dynamic",
@@ -202,12 +202,14 @@ def test_supported_method_order_includes_recovery_method_last() -> None:
         "social_replan",
         "social_replan_escape",
         "social_replan_recovery",
+        "social_predictive",
+        "social_predictive_replan",
     )
 
 
 @pytest.mark.parametrize(
     "method",
-    ("astar", "dynamic", "social", "social_replan"),
+    ("astar", "dynamic", "social", "social_replan", "social_predictive"),
 )
 def test_existing_methods_never_record_replans(method: str) -> None:
     scenario = generate_scenarios(1, seed=42)[0]
@@ -313,7 +315,12 @@ def test_failed_replan_retains_path_and_requires_fresh_stop_interval(
 
 @pytest.mark.parametrize(
     "method",
-    ("social_replan", "social_replan_escape", "social_replan_recovery"),
+    (
+        "social_replan",
+        "social_replan_escape",
+        "social_replan_recovery",
+        "social_predictive_replan",
+    ),
 )
 def test_replanning_methods_reject_nonpositive_stop_threshold(method: str) -> None:
     with pytest.raises(ValueError, match="replan_stop_steps must be positive"):
@@ -423,7 +430,15 @@ def test_escape_method_physically_moves_away_after_replan(
 
 @pytest.mark.parametrize(
     "method",
-    ("astar", "dynamic", "social", "social_replan", "social_replan_escape"),
+    (
+        "astar",
+        "dynamic",
+        "social",
+        "social_replan",
+        "social_replan_escape",
+        "social_predictive",
+        "social_predictive_replan",
+    ),
 )
 def test_existing_methods_never_record_recoveries(method: str) -> None:
     scenario = generate_scenarios(1, seed=42)[0]
@@ -599,5 +614,212 @@ def test_social_replan_recovery_is_deterministic_on_repeated_runs() -> None:
 
     first = run_episode_with_trace(scenario, "social_replan_recovery")
     second = run_episode_with_trace(scenario, "social_replan_recovery")
+
+    assert second == first
+
+
+@pytest.mark.parametrize(
+    "method",
+    (
+        "astar",
+        "dynamic",
+        "social",
+        "social_replan",
+        "social_replan_escape",
+        "social_replan_recovery",
+    ),
+)
+def test_existing_methods_do_not_use_predictive_planner(
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = generate_scenarios(1, seed=42)[0]
+    expected = run_episode_with_trace(scenario, method, max_steps=1)
+
+    def unexpected_predictive_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        pytest.fail("existing method called predictive social A*")
+
+    monkeypatch.setattr(
+        runner_module,
+        "predictive_social_astar",
+        unexpected_predictive_call,
+    )
+
+    actual = run_episode_with_trace(scenario, method, max_steps=1)
+
+    assert actual == expected
+
+
+def test_predictive_social_uses_initial_velocity_without_replanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[
+        tuple[
+            tuple[int, int],
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float],
+        ]
+    ] = []
+
+    def fake_predictive_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        pedestrian_position: tuple[float, float],
+        pedestrian_velocity: tuple[float, float],
+        *_args: object,
+        pedestrian_target: tuple[float, float],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]]:
+        calls.append(
+            (
+                start,
+                pedestrian_position,
+                pedestrian_velocity,
+                pedestrian_target,
+            )
+        )
+        return [(0, 0), (1, 0), (2, 0)]
+
+    monkeypatch.setattr(
+        runner_module,
+        "predictive_social_astar",
+        fake_predictive_social_astar,
+    )
+
+    _, trace = run_episode_with_trace(
+        _blocking_scenario(),
+        "social_predictive",
+        max_steps=2,
+        replan_stop_steps=1,
+    )
+
+    assert calls == [((0, 0), (0.25, 0.0), (0.0, 1.0), (0.25, 1.0))]
+    assert trace.replan_count == 0
+
+
+def test_predictive_replan_uses_current_position_velocity_and_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[
+        tuple[
+            tuple[int, int],
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float],
+        ]
+    ] = []
+
+    def fake_predictive_social_astar(
+        _grid_map: object,
+        start: tuple[int, int],
+        _goal: tuple[int, int],
+        pedestrian_position: tuple[float, float],
+        pedestrian_velocity: tuple[float, float],
+        *_args: object,
+        pedestrian_target: tuple[float, float],
+        **_kwargs: object,
+    ) -> list[tuple[int, int]]:
+        calls.append(
+            (
+                start,
+                pedestrian_position,
+                pedestrian_velocity,
+                pedestrian_target,
+            )
+        )
+        if len(calls) == 1:
+            return [(0, 0), (1, 0), (2, 0)]
+        return [start, (0, 1), (1, 1), (2, 1), (2, 0)]
+
+    monkeypatch.setattr(
+        runner_module,
+        "predictive_social_astar",
+        fake_predictive_social_astar,
+    )
+
+    _, trace = run_episode_with_trace(
+        _blocking_scenario(),
+        "social_predictive_replan",
+        max_steps=2,
+        replan_stop_steps=2,
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == (
+        (0, 0),
+        (0.25, 0.0),
+        (0.0, 1.0),
+        (0.25, 1.0),
+    )
+    assert calls[1][0] == (0, 0)
+    assert calls[1][1] == pytest.approx((0.25, SIMULATION_STEP))
+    assert calls[1][2] == pytest.approx((0.0, 1.0))
+    assert calls[1][3] == (0.25, 1.0)
+    assert trace.planned_path == (
+        (0.0, 0.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (2.0, 1.0),
+        (2.0, 0.0),
+    )
+    assert trace.replan_count == 1
+    assert trace.replan_steps == (2,)
+    assert trace.successful_replans == 1
+    assert trace.failed_replans == 0
+
+
+def test_failed_predictive_replan_retains_path_and_retries_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_predictive_social_astar(
+        _grid_map: object,
+        _start: tuple[int, int],
+        _goal: tuple[int, int],
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[int, int]] | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [(0, 0), (1, 0), (2, 0)]
+        return None
+
+    monkeypatch.setattr(
+        runner_module,
+        "predictive_social_astar",
+        fake_predictive_social_astar,
+    )
+
+    _, trace = run_episode_with_trace(
+        _blocking_scenario(),
+        "social_predictive_replan",
+        max_steps=4,
+        replan_stop_steps=2,
+    )
+
+    assert calls == 3
+    assert trace.replan_count == 2
+    assert trace.replan_steps == (2, 4)
+    assert trace.successful_replans == 0
+    assert trace.failed_replans == 2
+    assert trace.planned_path == ((0.0, 0.0), (1.0, 0.0), (2.0, 0.0))
+
+
+@pytest.mark.parametrize(
+    "method",
+    ("social_predictive", "social_predictive_replan"),
+)
+def test_predictive_methods_are_deterministic(method: str) -> None:
+    scenario = generate_diverse_scenarios(1, seed=42)[0]
+
+    first = run_episode_with_trace(scenario, method)
+    second = run_episode_with_trace(scenario, method)
 
     assert second == first

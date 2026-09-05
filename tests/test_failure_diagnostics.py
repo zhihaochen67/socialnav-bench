@@ -255,9 +255,11 @@ def test_failure_analysis_cli_defaults_to_requested_configuration() -> None:
         "social_replan",
         "social_replan_escape",
         "social_replan_recovery",
+        "social_predictive",
+        "social_predictive_replan",
     ),
 )
-def test_failure_analysis_cli_accepts_replanning_methods(method: str) -> None:
+def test_failure_analysis_cli_accepts_supported_social_methods(method: str) -> None:
     args = build_parser().parse_args(["--method", method])
 
     assert args.method == method

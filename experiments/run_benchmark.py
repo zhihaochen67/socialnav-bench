@@ -1,4 +1,4 @@
-"""Run the reproducible six-method SocialNav benchmark."""
+"""Run the reproducible eight-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -26,7 +26,11 @@ from socialnav.benchmark import (  # noqa: E402
     run_episode_with_trace,
 )
 from socialnav.env.world import SIMULATION_STEP, SLOW_DISTANCE  # noqa: E402
-from socialnav.planners import ESCAPE_SPEED_SCALE  # noqa: E402
+from socialnav.planners import (  # noqa: E402
+    ESCAPE_SPEED_SCALE,
+    PREDICTION_HORIZONS,
+    PREDICTION_TEMPORAL_WEIGHTS,
+)
 
 _METHOD_LABELS = {
     "astar": "A*",
@@ -35,6 +39,8 @@ _METHOD_LABELS = {
     "social_replan": "Social Replan",
     "social_replan_escape": "Social Replan + Escape",
     "social_replan_recovery": "Social Replan + Recovery",
+    "social_predictive": "Predictive Social",
+    "social_predictive_replan": "Predictive Social Replan",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -173,6 +179,8 @@ def main() -> None:
             "replan_stop_steps": REPLAN_STOP_STEPS,
             "escape_speed_scale": ESCAPE_SPEED_SCALE,
             "recovery_target_clearance": SLOW_DISTANCE,
+            "prediction_horizons": list(PREDICTION_HORIZONS),
+            "prediction_temporal_weights": list(PREDICTION_TEMPORAL_WEIGHTS),
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
@@ -187,6 +195,13 @@ def main() -> None:
                 "social_replan_recovery": (
                     "social A* with online replanning, direction-aware "
                     "escape control, and local clearance recovery"
+                ),
+                "social_predictive": (
+                    "predictive social A* with reactive avoidance"
+                ),
+                "social_predictive_replan": (
+                    "predictive social A* with reactive avoidance and "
+                    "online replanning using current pedestrian velocity"
                 ),
             },
         },

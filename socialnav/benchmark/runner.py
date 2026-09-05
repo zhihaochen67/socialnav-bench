@@ -10,7 +10,10 @@ from socialnav.env.demo_map import (
     grid_to_world,
     interpolate_path,
 )
-from socialnav.env.pedestrian import Pedestrian
+from socialnav.env.pedestrian import (
+    Pedestrian,
+    compute_pedestrian_velocity,
+)
 from socialnav.env.world import (
     GOAL_TOLERANCE,
     HUMAN_COLLISION_DISTANCE,
@@ -37,6 +40,9 @@ from socialnav.planners.directional_avoidance import (
     compute_directional_speed_scale,
 )
 from socialnav.planners.dynamic_avoidance import compute_speed_scale
+from socialnav.planners.predictive_social_planner import (
+    predictive_social_astar,
+)
 from socialnav.planners.social_planner import social_astar
 
 from .diagnostics import EpisodeTrace, did_episode_time_out
@@ -55,6 +61,8 @@ SUPPORTED_METHODS = (
     "social_replan",
     "social_replan_escape",
     "social_replan_recovery",
+    "social_predictive",
+    "social_predictive_replan",
 )
 MAX_EPISODE_SECONDS = 20.0
 MAX_EPISODE_STEPS = int(MAX_EPISODE_SECONDS / SIMULATION_STEP)
@@ -178,6 +186,7 @@ def run_episode_with_trace(
             "social_replan",
             "social_replan_escape",
             "social_replan_recovery",
+            "social_predictive_replan",
         )
         and replan_stop_steps <= 0
     ):
@@ -205,6 +214,26 @@ def run_episode_with_trace(
         )
         if selected_path is None:
             raise RuntimeError("social A* could not find a scenario path")
+    elif method in ("social_predictive", "social_predictive_replan"):
+        selected_path = predictive_social_astar(
+            grid_map,
+            scenario.start,
+            scenario.goal,
+            scenario.pedestrian_start,
+            compute_pedestrian_velocity(
+                scenario.pedestrian_start,
+                scenario.pedestrian_target,
+                scenario.pedestrian_speed,
+            ),
+            SOCIAL_DISTANCE,
+            SOCIAL_WEIGHT,
+            scenario.grid_scale,
+            pedestrian_target=scenario.pedestrian_target,
+        )
+        if selected_path is None:
+            raise RuntimeError(
+                "predictive social A* could not find a scenario path"
+            )
     else:
         selected_path = astar_path
 
@@ -265,6 +294,7 @@ def run_episode_with_trace(
                 "social_replan",
                 "social_replan_escape",
                 "social_replan_recovery",
+                "social_predictive_replan",
             )
             else None
         )
@@ -372,15 +402,28 @@ def run_episode_with_trace(
                     current_robot_position,
                     scenario.grid_scale,
                 )
-                replanned_path = social_astar(
-                    grid_map,
-                    replan_start,
-                    scenario.goal,
-                    pedestrian_positions=[pedestrian.position],
-                    social_distance=SOCIAL_DISTANCE,
-                    social_weight=SOCIAL_WEIGHT,
-                    grid_scale=scenario.grid_scale,
-                )
+                if method == "social_predictive_replan":
+                    replanned_path = predictive_social_astar(
+                        grid_map,
+                        replan_start,
+                        scenario.goal,
+                        pedestrian.position,
+                        pedestrian.velocity,
+                        SOCIAL_DISTANCE,
+                        SOCIAL_WEIGHT,
+                        scenario.grid_scale,
+                        pedestrian_target=pedestrian.target_position,
+                    )
+                else:
+                    replanned_path = social_astar(
+                        grid_map,
+                        replan_start,
+                        scenario.goal,
+                        pedestrian_positions=[pedestrian.position],
+                        social_distance=SOCIAL_DISTANCE,
+                        social_weight=SOCIAL_WEIGHT,
+                        grid_scale=scenario.grid_scale,
+                    )
                 if replanned_path is None:
                     failed_replans += 1
                 else:

@@ -52,3 +52,31 @@ def test_negative_time_step_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="time_step must be non-negative"):
         pedestrian.advance(-0.1)
+
+
+def test_velocity_matches_straight_line_speed() -> None:
+    pedestrian = Pedestrian((0.0, 0.0), (3.0, 4.0), speed=2.5)
+
+    assert pedestrian.velocity == pytest.approx((1.5, 2.0))
+    pedestrian.advance(0.5)
+    assert pedestrian.velocity == pytest.approx((1.5, 2.0))
+
+
+def test_velocity_is_zero_at_target() -> None:
+    pedestrian = Pedestrian((1.0, 2.0), (1.0, 2.0), speed=3.0)
+
+    assert pedestrian.velocity == (0.0, 0.0)
+
+
+def test_velocity_is_zero_when_speed_is_zero() -> None:
+    pedestrian = Pedestrian((1.0, 2.0), (4.0, 6.0), speed=0.0)
+
+    assert pedestrian.velocity == (0.0, 0.0)
+
+
+def test_velocity_repeated_calls_are_deterministic() -> None:
+    pedestrian = Pedestrian((0.25, 0.75), (2.0, 3.0), speed=1.25)
+
+    velocities = [pedestrian.velocity for _ in range(10)]
+
+    assert velocities == [velocities[0]] * 10

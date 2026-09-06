@@ -34,6 +34,26 @@ SocialNav-Bench studies how classical, social-aware, predictive, and space-time 
 
 The predictive local safety shield substantially reduces collisions in dense multi-pedestrian scenarios while preserving the underlying robust space-time planner.
 
+## Benchmark Trends
+
+The figures below are generated directly from the frozen 100-episode, seed-42 density benchmark.
+
+![Success and collision rates versus pedestrian density](docs/assets/success_collision_vs_density.png)
+
+![Social metrics versus pedestrian density](docs/assets/social_metrics_vs_density.png)
+
+![SPL versus pedestrian density](docs/assets/spl_vs_density.png)
+
+Shielded execution sharply reduces collision rate at every tested density. The success-rate improvements are more modest, and the N=10 scenarios remain challenging; these results do not imply that dense-crowd navigation is solved.
+
+Regenerate the figures from the frozen benchmark artifact with:
+
+```bash
+python experiments/plot_benchmark_results.py \\
+  --input outputs/shield_density_benchmark_seed42.json \\
+  --output-dir docs/assets
+```
+
 ## Navigation Methods
 
 The benchmark currently includes:

@@ -1,4 +1,4 @@
-"""Run the reproducible eleven-method SocialNav benchmark."""
+"""Run the reproducible twelve-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from socialnav.benchmark import (  # noqa: E402
     generate_scenarios,
     run_episode_with_trace,
     summarize_robust_execution,
+    summarize_shield_execution,
 )
 from socialnav.env.world import (  # noqa: E402
     HUMAN_COLLISION_DISTANCE,
@@ -53,6 +54,7 @@ _METHOD_LABELS = {
     "social_spacetime": "Space-Time Social",
     "social_spacetime_replan": "Space-Time Social Replan",
     "social_spacetime_robust": "Robust Space-Time Social",
+    "social_spacetime_shielded": "Shielded Space-Time Social",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -305,6 +307,22 @@ def main() -> None:
             ),
             "robust_stall_comparison": "displacement < threshold",
             "robust_duplicate_state_quantization": 0.001,
+            "shield_actions": ["UP", "RIGHT", "DOWN", "LEFT", "WAIT"],
+            "shield_samples": ["start", "midpoint", "end"],
+            "shield_wait_duration_rule": "grid_scale / robot_speed",
+            "shield_move_duration_rule": (
+                "euclidean(actual_pose, target) / candidate_execution_speed"
+            ),
+            "shield_ordinary_move_speed_scale": 1.0,
+            "shield_collision_egress_speed_scale": ESCAPE_SPEED_SCALE,
+            "shield_selection_order": [
+                "collision_safe_and_egress_valid",
+                "greater_minimum_predicted_human_separation",
+                "smaller_distance_to_goal",
+                "shorter_local_displacement",
+                "UP_RIGHT_DOWN_LEFT_WAIT",
+                "lower_target_x_then_y",
+            ],
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
@@ -340,6 +358,11 @@ def main() -> None:
                     "collision egress, progress-aware replanning, duplicate "
                     "suppression, and direction-aware execution"
                 ),
+                "social_spacetime_shielded": (
+                    "robust space-time planning with predictive local "
+                    "MOVE/WAIT safety checks, deterministic physical "
+                    "overrides, and immediate post-override replanning"
+                ),
             },
         },
         "scenarios": [asdict(scenario) for scenario in scenarios],
@@ -362,7 +385,19 @@ def main() -> None:
                         results_by_method[method],
                         traces_by_method[method],
                     )
-                    if method == "social_spacetime_robust"
+                    if method in (
+                        "social_spacetime_robust",
+                        "social_spacetime_shielded",
+                    )
+                    else None
+                ),
+                "shield": (
+                    summarize_shield_execution(
+                        scenarios,
+                        results_by_method[method],
+                        traces_by_method[method],
+                    )
+                    if method == "social_spacetime_shielded"
                     else None
                 ),
                 "episodes": [
@@ -454,6 +489,60 @@ def main() -> None:
                             "minimum_predicted_separation": (
                                 trace.minimum_predicted_separation
                             ),
+                            "shield_checks": trace.shield_checks,
+                            "shield_activations": trace.shield_activations,
+                            "shield_safe_passthroughs": (
+                                trace.shield_safe_passthroughs
+                            ),
+                            "unsafe_planned_moves": (
+                                trace.unsafe_planned_moves
+                            ),
+                            "unsafe_waits": trace.unsafe_waits,
+                            "local_override_count": (
+                                trace.local_override_count
+                            ),
+                            "local_override_actions": list(
+                                trace.local_override_actions
+                            ),
+                            "local_override_target_cells": list(
+                                trace.local_override_target_cells
+                            ),
+                            "local_override_unsafe_human_indices": [
+                                list(indices)
+                                for indices in (
+                                    trace.local_override_unsafe_human_indices
+                                )
+                            ],
+                            "candidate_actions_evaluated": (
+                                trace.candidate_actions_evaluated
+                            ),
+                            "candidate_actions_safe": (
+                                trace.candidate_actions_safe
+                            ),
+                            "shield_trigger_reasons": list(
+                                trace.shield_trigger_reasons
+                            ),
+                            "shield_min_predicted_separation": (
+                                trace.shield_min_predicted_separation
+                            ),
+                            "post_override_replans": (
+                                trace.post_override_replans
+                            ),
+                            "post_override_replan_successes": (
+                                trace.post_override_replan_successes
+                            ),
+                            "post_override_replan_failures": (
+                                trace.post_override_replan_failures
+                            ),
+                            "no_safe_local_action_events": (
+                                trace.no_safe_local_action_events
+                            ),
+                            "shield_collision_attributions": [
+                                asdict(attribution)
+                                for attribution in (
+                                    trace.shield_collision_attributions
+                                )
+                            ],
                         },
                     }
                     for scenario, result, trace in zip(

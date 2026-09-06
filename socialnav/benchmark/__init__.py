@@ -9,6 +9,7 @@ from .diagnostics import (
     STOPPED_SPEED_TOLERANCE,
     EpisodeTrace,
     FailureDiagnostic,
+    ShieldCollisionAttribution,
     classify_failure,
     count_stopped_steps,
     diagnose_failure,
@@ -33,7 +34,10 @@ from .replanning import (
     interpolate_replanned_route,
     world_to_nearest_free_cell,
 )
-from .robust_reporting import summarize_robust_execution
+from .robust_reporting import (
+    summarize_robust_execution,
+    summarize_shield_execution,
+)
 from .scenario import (
     DIVERSE_MIN_PATH_MOVES,
     PedestrianSpec,
@@ -60,6 +64,7 @@ __all__ = [
     "FailureDiagnostic",
     "MethodSummary",
     "Scenario",
+    "ShieldCollisionAttribution",
     "SustainedStopReplanPolicy",
     "aggregate_results",
     "build_scenario_grid",
@@ -80,5 +85,6 @@ __all__ = [
     "run_episode_with_trace",
     "stopped_fraction",
     "summarize_robust_execution",
+    "summarize_shield_execution",
     "world_to_nearest_free_cell",
 ]

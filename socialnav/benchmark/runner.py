@@ -62,6 +62,7 @@ from .replanning import (
 )
 from .robust_space_time_runner import (
     ROBUST_SPACE_TIME_METHOD,
+    SHIELDED_SPACE_TIME_METHOD,
     run_robust_space_time_episode_with_trace,
 )
 from .scenario import PedestrianSpec, Scenario, build_scenario_grid
@@ -82,6 +83,7 @@ SUPPORTED_METHODS = (
     "social_spacetime",
     "social_spacetime_replan",
     "social_spacetime_robust",
+    "social_spacetime_shielded",
 )
 MAX_EPISODE_SECONDS = 20.0
 MAX_EPISODE_STEPS = int(MAX_EPISODE_SECONDS / SIMULATION_STEP)
@@ -256,12 +258,13 @@ def run_episode_with_trace(
             "social_predictive_replan",
             "social_spacetime_replan",
             "social_spacetime_robust",
+            "social_spacetime_shielded",
         )
         and replan_stop_steps <= 0
     ):
         raise ValueError("replan_stop_steps must be positive")
 
-    if method == ROBUST_SPACE_TIME_METHOD:
+    if method in (ROBUST_SPACE_TIME_METHOD, SHIELDED_SPACE_TIME_METHOD):
         return run_robust_space_time_episode_with_trace(
             scenario,
             method,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import hypot
+from math import hypot, isfinite
 
 import pybullet as p
 
@@ -37,6 +37,13 @@ from socialnav.planners.directional_avoidance import (
     ESCAPE_SPEED_SCALE,
     compute_directional_speed_scale,
 )
+from socialnav.planners.local_safety_shield import (
+    ShieldCandidateEvaluation,
+    ShieldTriggerReason,
+    evaluate_local_action,
+    evaluate_local_candidates,
+    select_safe_local_action,
+)
 from socialnav.planners.robust_space_time_planner import (
     RobustSpaceTimePlan,
     RobustSpaceTimePlanningResult,
@@ -44,12 +51,17 @@ from socialnav.planners.robust_space_time_planner import (
     robust_space_time_social_astar,
 )
 from socialnav.planners.space_time_planner import (
+    SpaceTimeAction,
     SpaceTimePlanningResult,
     SpaceTimeSearchStatistics,
     duration_to_simulation_steps,
 )
 
-from .diagnostics import EpisodeTrace, did_episode_time_out
+from .diagnostics import (
+    EpisodeTrace,
+    ShieldCollisionAttribution,
+    did_episode_time_out,
+)
 from .replanning import world_to_nearest_free_cell
 from .robust_execution import (
     FailedReplanSuppressor,
@@ -68,6 +80,119 @@ from .space_time_runner import (
 )
 
 ROBUST_SPACE_TIME_METHOD = "social_spacetime_robust"
+SHIELDED_SPACE_TIME_METHOD = "social_spacetime_shielded"
+
+
+def _pedestrian_states(
+    pedestrians: list[Pedestrian],
+) -> tuple[tuple[Position, Position, Position], ...]:
+    return tuple(
+        (
+            pedestrian.position,
+            pedestrian.velocity,
+            pedestrian.target_position,
+        )
+        for pedestrian in pedestrians
+    )
+
+
+def _action_for_target(
+    mapped_start: tuple[int, int],
+    target_cell: tuple[int, int],
+    start_position: Position,
+    target_position: Position,
+) -> SpaceTimeAction:
+    delta = (
+        target_cell[0] - mapped_start[0],
+        target_cell[1] - mapped_start[1],
+    )
+    by_delta: dict[tuple[int, int], SpaceTimeAction] = {
+        (0, -1): "UP",
+        (1, 0): "RIGHT",
+        (0, 1): "DOWN",
+        (-1, 0): "LEFT",
+    }
+    if delta in by_delta:
+        return by_delta[delta]
+    motion = (
+        target_position[0] - start_position[0],
+        target_position[1] - start_position[1],
+    )
+    if motion == (0.0, 0.0):
+        return "WAIT"
+    if abs(motion[0]) >= abs(motion[1]):
+        return "RIGHT" if motion[0] > 0.0 else "LEFT"
+    return "DOWN" if motion[1] > 0.0 else "UP"
+
+
+def _shield_collision_attributions(
+    robot_trajectory: list[Position],
+    pedestrian_trajectories: list[list[Position]],
+    execution_phases: list[str],
+    evaluated_actions: list[str | None],
+    predicted_separations: list[float | None],
+) -> tuple[ShieldCollisionAttribution, ...]:
+    first_step = next(
+        (
+            step
+            for step in range(1, len(robot_trajectory))
+            if any(
+                hypot(
+                    robot_trajectory[step][0] - human[step][0],
+                    robot_trajectory[step][1] - human[step][1],
+                )
+                <= HUMAN_COLLISION_DISTANCE
+                for human in pedestrian_trajectories
+            )
+        ),
+        None,
+    )
+    if first_step is None:
+        return ()
+    control_index = first_step - 1
+    robot_motion = (
+        robot_trajectory[first_step][0]
+        - robot_trajectory[first_step - 1][0],
+        robot_trajectory[first_step][1]
+        - robot_trajectory[first_step - 1][1],
+    )
+    attributions = []
+    for index, human in enumerate(pedestrian_trajectories):
+        if hypot(
+            robot_trajectory[first_step][0] - human[first_step][0],
+            robot_trajectory[first_step][1] - human[first_step][1],
+        ) > HUMAN_COLLISION_DISTANCE:
+            continue
+        human_motion = (
+            human[first_step][0] - human[first_step - 1][0],
+            human[first_step][1] - human[first_step - 1][1],
+        )
+        to_robot = (
+            robot_trajectory[first_step - 1][0]
+            - human[first_step - 1][0],
+            robot_trajectory[first_step - 1][1]
+            - human[first_step - 1][1],
+        )
+        moved_into_robot = (
+            hypot(*robot_motion) <= 1e-12
+            and hypot(*human_motion) > 0.0
+            and human_motion[0] * to_robot[0]
+            + human_motion[1] * to_robot[1]
+            > 1e-12
+        )
+        predicted = predicted_separations[control_index]
+        attributions.append(
+            ShieldCollisionAttribution(
+                pedestrian_index=index,
+                execution_phase=execution_phases[control_index],
+                shield_evaluated_interval=predicted is not None,
+                candidate_action_selected=evaluated_actions[control_index],
+                predicted_minimum_separation=predicted,
+                actual_first_collision_time=first_step * SIMULATION_STEP,
+                pedestrian_moved_into_robot=moved_into_robot,
+            )
+        )
+    return tuple(attributions)
 
 
 def _closest_pedestrian(
@@ -230,6 +355,8 @@ def _classify_robust_episode_failure(
     if progress_stall_events > 0:
         return "progress_stall"
     return "other"
+
+
 def run_robust_space_time_episode_with_trace(
     scenario: Scenario,
     method: str,
@@ -237,11 +364,13 @@ def run_robust_space_time_episode_with_trace(
     max_steps: int,
     replan_stop_steps: int,
 ) -> tuple[EpisodeResult, EpisodeTrace]:
-    """Execute the new robust method without sharing old-method control state."""
-    if method != ROBUST_SPACE_TIME_METHOD:
+    """Execute robust or shielded robust space-time navigation."""
+    if method not in (ROBUST_SPACE_TIME_METHOD, SHIELDED_SPACE_TIME_METHOD):
         raise ValueError(
-            f"robust space-time method must be {ROBUST_SPACE_TIME_METHOD}"
+            "robust space-time method must be one of "
+            f"{ROBUST_SPACE_TIME_METHOD}, {SHIELDED_SPACE_TIME_METHOD}"
         )
+    shielded = method == SHIELDED_SPACE_TIME_METHOD
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
     if replan_stop_steps <= 0:
@@ -421,11 +550,37 @@ def run_robust_space_time_episode_with_trace(
         action_index = 0
         action_progress = 0.0
         action_start_position: Position | None = None
+        override: ShieldCandidateEvaluation | None = None
+        override_start_position: Position | None = None
+        override_progress = 0
+        override_steps = 0
+        post_override_replan_pending = False
+        shield_checks = 0
+        shield_activations = 0
+        shield_safe_passthroughs = 0
+        unsafe_planned_moves = 0
+        unsafe_waits = 0
+        local_override_actions: list[str] = []
+        local_override_target_cells: list[tuple[int, int]] = []
+        local_override_unsafe_human_indices: list[tuple[int, ...]] = []
+        candidate_actions_evaluated = 0
+        candidate_actions_safe = 0
+        shield_trigger_reasons: list[ShieldTriggerReason] = []
+        shield_predicted_separations: list[float] = []
+        post_override_replans = 0
+        post_override_replan_successes = 0
+        post_override_replan_failures = 0
+        no_safe_local_action_events = 0
+        execution_phases: list[str] = []
+        evaluated_actions: list[str | None] = []
+        per_step_predicted_separations: list[float | None] = []
         steps = 0
 
         def plan_is_complete() -> bool:
             return (
                 current_plan is not None
+                and override is None
+                and not post_override_replan_pending
                 and bridge_progress >= bridge_steps
                 and action_index >= len(current_plan.grid_plan.actions)
             )
@@ -438,6 +593,7 @@ def run_robust_space_time_episode_with_trace(
             )
 
             if pending_stall_event is not None:
+                is_post_override_replan = post_override_replan_pending
                 mapped_start = world_to_nearest_free_cell(
                     grid_map,
                     current_robot_position,
@@ -447,7 +603,9 @@ def run_robust_space_time_episode_with_trace(
                     pedestrians,
                     current_robot_position,
                 )
-                if suppressor.should_suppress(
+                if (
+                    not is_post_override_replan
+                    and suppressor.should_suppress(
                     mapped_start=mapped_start,
                     robot_position=current_robot_position,
                     pedestrian_position=(
@@ -473,10 +631,13 @@ def run_robust_space_time_episode_with_trace(
                         )
                         for pedestrian in pedestrians
                     ),
+                    )
                 ):
                     suppressed_duplicate_replans += 1
                 else:
                     replan_steps.append(steps)
+                    if is_post_override_replan:
+                        post_override_replans += 1
                     replanned_result = _plan(
                         scenario,
                         current_robot_position,
@@ -500,7 +661,11 @@ def run_robust_space_time_episode_with_trace(
                             remaining_episode_time=(
                                 (max_steps - steps) * SIMULATION_STEP
                             ),
-                            stopped_streak=replan_stop_steps,
+                            stopped_streak=(
+                                0
+                                if is_post_override_replan
+                                else replan_stop_steps
+                            ),
                             total_reactive_stopped_steps=(
                                 reactive_stopped_steps
                             ),
@@ -514,6 +679,9 @@ def run_robust_space_time_episode_with_trace(
                     )
                     if replanned_result.plan is None:
                         robust_replan_failures += 1
+                        if is_post_override_replan:
+                            post_override_replan_failures += 1
+                            current_plan = None
                         spacetime_planning_failures += 1
                         assert replanned_result.failure_reason is not None
                         closest_failed = _closest_pedestrian(
@@ -552,6 +720,8 @@ def run_robust_space_time_episode_with_trace(
                         )
                     else:
                         robust_replan_successes += 1
+                        if is_post_override_replan:
+                            post_override_replan_successes += 1
                         previous_successful_plan_step = steps
                         suppressor.record_success()
                         current_plan = replanned_result.plan
@@ -570,9 +740,273 @@ def run_robust_space_time_episode_with_trace(
                         action_start_position = None
                 stall_detector.reset(current_robot_position)
                 pending_stall_event = None
+                post_override_replan_pending = False
+                if is_post_override_replan and plan_is_complete():
+                    continue
             robot_position = current_robot_position
             intentional_wait = False
-            if current_plan is None:
+            execution_phase = "robust_baseline"
+            evaluated_action: str | None = None
+            predicted_separation: float | None = None
+            shield_handled = False
+
+            if shielded:
+                if override is None:
+                    mapped_for_shield = world_to_nearest_free_cell(
+                        grid_map,
+                        current_robot_position,
+                        scenario.grid_scale,
+                    )
+                    pedestrian_states = _pedestrian_states(pedestrians)
+                    goal_position = grid_to_world(
+                        scenario.goal,
+                        scenario.grid_scale,
+                    )
+                    planned_action: SpaceTimeAction
+                    planned_target_cell = mapped_for_shield
+                    planned_target_position = current_robot_position
+                    planned_speed_scale = 1.0
+                    planned_is_wait = False
+                    reactive_stop = False
+                    execution_phase = "no_plan_wait"
+
+                    if current_plan is None:
+                        planned_action = "WAIT"
+                        planned_is_wait = True
+                    elif bridge_progress < bridge_steps:
+                        planned_target_cell = current_plan.bridge.target_cell
+                        planned_target_position = (
+                            current_plan.bridge.target_position
+                        )
+                        planned_action = _action_for_target(
+                            mapped_for_shield,
+                            planned_target_cell,
+                            current_robot_position,
+                            planned_target_position,
+                        )
+                        intended_motion = (
+                            planned_target_position[0]
+                            - current_robot_position[0],
+                            planned_target_position[1]
+                            - current_robot_position[1],
+                        )
+                        if closest is not None:
+                            planned_speed_scale = (
+                                compute_directional_speed_scale(
+                                    current_robot_position,
+                                    closest.position,
+                                    intended_motion,
+                                    STOP_DISTANCE,
+                                    SLOW_DISTANCE,
+                                    ESCAPE_SPEED_SCALE,
+                                    additional_pedestrian_positions=[
+                                        pedestrian.position
+                                        for pedestrian in pedestrians
+                                        if pedestrian is not closest
+                                    ],
+                                )
+                            )
+                        reactive_stop = planned_speed_scale == 0.0
+                        if reactive_stop:
+                            planned_action = "WAIT"
+                            planned_target_cell = mapped_for_shield
+                            planned_target_position = current_robot_position
+                            planned_is_wait = True
+                            execution_phase = "reactive_stop"
+                        else:
+                            execution_phase = "bridge"
+                    else:
+                        grid_plan = current_plan.grid_plan
+                        planned_action = grid_plan.actions[action_index]
+                        if planned_action == "WAIT":
+                            planned_is_wait = True
+                            execution_phase = "planned_wait"
+                        else:
+                            next_state = grid_plan.timed_states[
+                                action_index + 1
+                            ]
+                            planned_target_cell = (
+                                next_state[0],
+                                next_state[1],
+                            )
+                            planned_target_position = grid_to_world(
+                                planned_target_cell,
+                                scenario.grid_scale,
+                            )
+                            intended_motion = (
+                                planned_target_position[0]
+                                - current_robot_position[0],
+                                planned_target_position[1]
+                                - current_robot_position[1],
+                            )
+                            if closest is not None:
+                                planned_speed_scale = (
+                                    compute_directional_speed_scale(
+                                        current_robot_position,
+                                        closest.position,
+                                        intended_motion,
+                                        STOP_DISTANCE,
+                                        SLOW_DISTANCE,
+                                        ESCAPE_SPEED_SCALE,
+                                        additional_pedestrian_positions=[
+                                            pedestrian.position
+                                            for pedestrian in pedestrians
+                                            if pedestrian is not closest
+                                        ],
+                                    )
+                                )
+                            reactive_stop = planned_speed_scale == 0.0
+                            if reactive_stop:
+                                planned_action = "WAIT"
+                                planned_target_cell = mapped_for_shield
+                                planned_target_position = (
+                                    current_robot_position
+                                )
+                                planned_is_wait = True
+                                execution_phase = "reactive_stop"
+                            else:
+                                execution_phase = "grid_move"
+
+                    planned_evaluation = evaluate_local_action(
+                        grid_map,
+                        current_robot_position,
+                        mapped_for_shield,
+                        planned_action,
+                        pedestrian_states,
+                        grid_scale=scenario.grid_scale,
+                        robot_speed=ROBOT_SPEED,
+                        collision_distance=HUMAN_COLLISION_DISTANCE,
+                        move_speed_scale=(
+                            planned_speed_scale
+                            if planned_speed_scale > 0.0
+                            else 1.0
+                        ),
+                        target_cell=planned_target_cell,
+                        target_position=planned_target_position,
+                    )
+                    shield_checks += 1
+                    evaluated_action = planned_evaluation.action
+                    predicted_separation = (
+                        planned_evaluation.minimum_predicted_separation
+                    )
+                    if isfinite(predicted_separation):
+                        shield_predicted_separations.append(
+                            predicted_separation
+                        )
+
+                    if planned_evaluation.safe:
+                        shield_safe_passthroughs += 1
+                    else:
+                        shield_activations += 1
+                        if planned_is_wait:
+                            unsafe_waits += 1
+                        else:
+                            unsafe_planned_moves += 1
+                        if planned_evaluation.starts_in_collision:
+                            trigger_reason: ShieldTriggerReason = (
+                                "already_in_collision"
+                            )
+                        elif reactive_stop:
+                            trigger_reason = (
+                                "reactive_stop_with_incoming_human"
+                            )
+                        elif planned_is_wait:
+                            trigger_reason = (
+                                "stationary_wait_predicted_unsafe"
+                            )
+                        elif planned_action != "WAIT":
+                            trigger_reason = (
+                                "planned_move_predicted_unsafe"
+                            )
+                        else:
+                            trigger_reason = "other"
+                        shield_trigger_reasons.append(trigger_reason)
+
+                        candidates = evaluate_local_candidates(
+                            grid_map,
+                            current_robot_position,
+                            mapped_for_shield,
+                            pedestrian_states,
+                            grid_scale=scenario.grid_scale,
+                            robot_speed=ROBOT_SPEED,
+                            collision_distance=HUMAN_COLLISION_DISTANCE,
+                        )
+                        candidate_actions_evaluated += len(candidates)
+                        candidate_actions_safe += sum(
+                            candidate.safe for candidate in candidates
+                        )
+                        shield_predicted_separations.extend(
+                            candidate.minimum_predicted_separation
+                            for candidate in candidates
+                            if isfinite(
+                                candidate.minimum_predicted_separation
+                            )
+                        )
+                        override = select_safe_local_action(
+                            candidates,
+                            progress_target=goal_position,
+                        )
+                        if override is None:
+                            no_safe_local_action_events += 1
+                            shield_handled = True
+                            speed_scale = 0.0
+                            execution_phase = "no_safe_local_action"
+                            evaluated_action = None
+                        else:
+                            local_override_actions.append(override.action)
+                            local_override_target_cells.append(
+                                override.target_cell
+                            )
+                            local_override_unsafe_human_indices.append(
+                                planned_evaluation.unsafe_human_indices
+                            )
+                            override_start_position = (
+                                current_robot_position
+                            )
+                            override_progress = 0
+                            override_steps = duration_to_simulation_steps(
+                                override.duration,
+                                SIMULATION_STEP,
+                            )
+
+                if override is not None:
+                    assert override_start_position is not None
+                    shield_handled = True
+                    override_progress += 1
+                    fraction = min(
+                        override_progress / override_steps,
+                        1.0,
+                    )
+                    robot_position = (
+                        override_start_position[0]
+                        + (
+                            override.target_position[0]
+                            - override_start_position[0]
+                        )
+                        * fraction,
+                        override_start_position[1]
+                        + (
+                            override.target_position[1]
+                            - override_start_position[1]
+                        )
+                        * fraction,
+                    )
+                    speed_scale = override.speed_scale
+                    intentional_wait = override.action == "WAIT"
+                    execution_phase = "local_override"
+                    evaluated_action = override.action
+                    predicted_separation = (
+                        override.minimum_predicted_separation
+                    )
+                    if override_progress >= override_steps:
+                        override = None
+                        override_start_position = None
+                        post_override_replan_pending = True
+                        pending_stall_event = "progress_stall"
+
+            if shield_handled:
+                pass
+            elif current_plan is None:
                 speed_scale = 0.0
             elif bridge_progress < bridge_steps:
                 intended_motion = (
@@ -693,6 +1127,12 @@ def run_robust_space_time_episode_with_trace(
                         action_start_position = None
 
             speed_scales.append(speed_scale)
+            if shielded:
+                execution_phases.append(execution_phase)
+                evaluated_actions.append(evaluated_action)
+                per_step_predicted_separations.append(
+                    predicted_separation
+                )
             p.resetBasePositionAndOrientation(
                 robot_id,
                 (*robot_position, ROBOT_HEIGHT / 2 + 0.01),
@@ -763,12 +1203,45 @@ def run_robust_space_time_episode_with_trace(
                     for coordinate in selected_plan.grid_plan.spatial_path[1:]
                 ),
             )
+        timed_out = did_episode_time_out(
+            steps=steps,
+            max_steps=max_steps,
+            path_completed=path_completed,
+        )
         robust_failure_reason = _classify_robust_episode_failure(
             result,
             robust_planning_failure_reasons,
             progress_stall_events,
             robust_replan_successes,
         )
+        if shielded and not result.success:
+            if result.human_collision:
+                robust_failure_reason = "human_collision"
+            elif (
+                no_safe_local_action_events
+                and sum(
+                    hypot(
+                        robot_trajectory[-1][0] - pedestrian.position[0],
+                        robot_trajectory[-1][1] - pedestrian.position[1],
+                    )
+                    <= SLOW_DISTANCE
+                    for pedestrian in pedestrians
+                )
+                >= 2
+            ):
+                robust_failure_reason = "local_multi_human_trap"
+            elif no_safe_local_action_events:
+                robust_failure_reason = "no_safe_local_action"
+            elif post_override_replan_failures:
+                robust_failure_reason = "post_override_replan_failure"
+            elif shield_activations > 1:
+                robust_failure_reason = "repeated_unsafe_state"
+            elif timed_out:
+                robust_failure_reason = "horizon_timeout"
+            elif progress_stall_events or exact_zero_stall_events:
+                robust_failure_reason = "execution_deadlock"
+            else:
+                robust_failure_reason = "other"
         final_robot_position = robot_trajectory[-1]
         closest_final = _closest_pedestrian(
             pedestrians,
@@ -784,11 +1257,7 @@ def run_robust_space_time_episode_with_trace(
         trace = EpisodeTrace(
             planned_path=planned_path,
             speed_scales=tuple(speed_scales),
-            timed_out=did_episode_time_out(
-                steps=steps,
-                max_steps=max_steps,
-                path_completed=path_completed,
-            ),
+            timed_out=timed_out,
             final_robot_position=final_robot_position,
             final_pedestrian_position=(
                 closest_final.position
@@ -863,6 +1332,43 @@ def run_robust_space_time_episode_with_trace(
                 <= STOP_DISTANCE
             ),
             minimum_predicted_separation=minimum_predicted_separation,
+            shield_checks=shield_checks,
+            shield_activations=shield_activations,
+            shield_safe_passthroughs=shield_safe_passthroughs,
+            unsafe_planned_moves=unsafe_planned_moves,
+            unsafe_waits=unsafe_waits,
+            local_override_count=len(local_override_actions),
+            local_override_actions=tuple(local_override_actions),
+            local_override_target_cells=tuple(
+                local_override_target_cells
+            ),
+            local_override_unsafe_human_indices=tuple(
+                local_override_unsafe_human_indices
+            ),
+            candidate_actions_evaluated=candidate_actions_evaluated,
+            candidate_actions_safe=candidate_actions_safe,
+            shield_trigger_reasons=tuple(shield_trigger_reasons),
+            shield_min_predicted_separation=min(
+                shield_predicted_separations,
+                default=None,
+            ),
+            post_override_replans=post_override_replans,
+            post_override_replan_successes=(
+                post_override_replan_successes
+            ),
+            post_override_replan_failures=post_override_replan_failures,
+            no_safe_local_action_events=no_safe_local_action_events,
+            shield_collision_attributions=(
+                _shield_collision_attributions(
+                    robot_trajectory,
+                    pedestrian_trajectories,
+                    execution_phases,
+                    evaluated_actions,
+                    per_step_predicted_separations,
+                )
+                if shielded
+                else ()
+            ),
         )
         return result, trace
     finally:

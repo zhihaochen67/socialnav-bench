@@ -24,6 +24,15 @@ from .pedestrian_prediction import (
     predict_pedestrian_position_at_time,
     predict_pedestrian_positions,
 )
+from .local_safety_shield import (
+    LOCAL_ACTIONS,
+    LOCAL_ACTION_ORDER,
+    ShieldCandidateEvaluation,
+    ShieldTriggerReason,
+    evaluate_local_action,
+    evaluate_local_candidates,
+    select_safe_local_action,
+)
 from .predictive_social_planner import predictive_social_astar
 from .robust_space_time_planner import (
     BridgeCandidateEvaluation,
@@ -55,12 +64,16 @@ __all__ = [
     "PREDICTION_EPSILON",
     "PREDICTION_HORIZONS",
     "PREDICTION_TEMPORAL_WEIGHTS",
+    "LOCAL_ACTIONS",
+    "LOCAL_ACTION_ORDER",
     "BridgeCandidateEvaluation",
     "PedestrianPredictionState",
     "ContinuousStartBridge",
     "EGRESS_SEPARATION_TOLERANCE",
     "RobustSpaceTimePlan",
     "RobustSpaceTimePlanningResult",
+    "ShieldCandidateEvaluation",
+    "ShieldTriggerReason",
     "SpaceTimePlan",
     "astar",
     "compute_directional_speed_scale",
@@ -71,6 +84,8 @@ __all__ = [
     "compute_social_cost",
     "compute_speed_scale",
     "duration_to_simulation_steps",
+    "evaluate_local_action",
+    "evaluate_local_candidates",
     "build_continuous_start_transitions",
     "find_clearance_recovery_path",
     "interpolate_bridge_position",
@@ -86,6 +101,7 @@ __all__ = [
     "predictive_social_astar",
     "robust_space_time_social_astar",
     "select_continuous_start_bridge",
+    "select_safe_local_action",
     "social_astar",
     "space_time_social_astar",
 ]

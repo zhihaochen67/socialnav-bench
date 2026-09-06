@@ -25,6 +25,7 @@ from socialnav.benchmark import (  # noqa: E402
     generate_diverse_scenarios,
     run_episode_with_trace,
     summarize_robust_execution,
+    summarize_shield_execution,
 )
 from socialnav.env.world import (  # noqa: E402
     HUMAN_COLLISION_DISTANCE,
@@ -54,6 +55,7 @@ _METHOD_LABELS = {
     "social_spacetime": "Space-Time Social",
     "social_spacetime_replan": "Space-Time Social Replan",
     "social_spacetime_robust": "Robust Space-Time Social",
+    "social_spacetime_shielded": "Shielded Space-Time Social",
 }
 
 _METHOD_NAMES = list(SUPPORTED_METHODS)
@@ -144,11 +146,11 @@ def _print_density_table(
     print(f"Pedestrians={pedestrian_count}")
     print(
         "Pedestrians | Method                     | Success | Collision | "
-        "SPL    | MinDist | SocialViolation | Timeouts"
+        "SPL    | PathLen | Time   | MinDist | SocialViolation | Timeouts"
     )
     print(
         "----------- | -------------------------- | ------- | --------- | "
-        "------ | ------- | --------------- | --------"
+        "------ | ------- | ------ | ------- | --------------- | --------"
     )
     for method in methods:
         summary = summaries[method]
@@ -157,6 +159,8 @@ def _print_density_table(
             f"{summary.success_rate:>7.3f} | "
             f"{summary.collision_rate:>9.3f} | "
             f"{summary.mean_spl:>6.3f} | "
+            f"{summary.mean_path_length:>7.3f} | "
+            f"{_format_optional(summary.mean_time_to_goal):>6} | "
             f"{_format_optional(summary.mean_minimum_human_distance):>7} | "
             f"{summary.mean_social_violation_rate:>15.3f} | "
             f"{timeout_counts[method]:>8}"
@@ -263,6 +267,22 @@ def main() -> None:
         "robust_stall_window_steps": REPLAN_STOP_STEPS,
         "robust_progress_threshold_meters": ROBOT_SPEED * SIMULATION_STEP,
         "robust_duplicate_state_quantization": 0.001,
+        "shield_actions": ["UP", "RIGHT", "DOWN", "LEFT", "WAIT"],
+        "shield_samples": ["start", "midpoint", "end"],
+        "shield_wait_duration_rule": "grid_scale / robot_speed",
+        "shield_move_duration_rule": (
+            "euclidean(actual_pose, target) / candidate_execution_speed"
+        ),
+        "shield_ordinary_move_speed_scale": 1.0,
+        "shield_collision_egress_speed_scale": ESCAPE_SPEED_SCALE,
+        "shield_selection_order": [
+            "collision_safe_and_egress_valid",
+            "greater_minimum_predicted_human_separation",
+            "smaller_distance_to_goal",
+            "shorter_local_displacement",
+            "UP_RIGHT_DOWN_LEFT_WAIT",
+            "lower_target_x_then_y",
+        ],
         "methods": {
             "astar": "ordinary A* without reactive avoidance",
             "dynamic": "ordinary A* with reactive avoidance",
@@ -297,6 +317,11 @@ def main() -> None:
                 "continuous-start time-expanded social A* with safe "
                 "collision egress, progress-aware replanning, duplicate "
                 "suppression, and direction-aware execution"
+            ),
+            "social_spacetime_shielded": (
+                "robust space-time planning with predictive local MOVE/"
+                "WAIT safety checks, deterministic physical overrides, "
+                "and immediate post-override replanning"
             ),
         },
     }
@@ -360,7 +385,19 @@ def main() -> None:
                         results_by_method[method],
                         traces_by_method[method],
                     )
-                    if method == "social_spacetime_robust"
+                    if method in (
+                        "social_spacetime_robust",
+                        "social_spacetime_shielded",
+                    )
+                    else None
+                ),
+                "shield": (
+                    summarize_shield_execution(
+                        scenarios,
+                        results_by_method[method],
+                        traces_by_method[method],
+                    )
+                    if method == "social_spacetime_shielded"
                     else None
                 ),
             }

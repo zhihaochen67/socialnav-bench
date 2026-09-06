@@ -21,6 +21,19 @@ LONGEST_STOPPED_FRACTION_THRESHOLD = 0.25
 
 
 @dataclass(frozen=True)
+class ShieldCollisionAttribution:
+    """Shield evidence aligned to one pedestrian''s first collision."""
+
+    pedestrian_index: int
+    execution_phase: str
+    shield_evaluated_interval: bool
+    candidate_action_selected: str | None
+    predicted_minimum_separation: float | None
+    actual_first_collision_time: float
+    pedestrian_moved_into_robot: bool
+
+
+@dataclass(frozen=True)
 class EpisodeTrace:
     """Runner state needed to diagnose an episode without changing metrics."""
 
@@ -73,6 +86,26 @@ class EpisodeTrace:
     collision_human_indices: tuple[int, ...] = ()
     blocking_human_indices: tuple[int, ...] = ()
     minimum_predicted_separation: float | None = None
+    shield_checks: int = 0
+    shield_activations: int = 0
+    shield_safe_passthroughs: int = 0
+    unsafe_planned_moves: int = 0
+    unsafe_waits: int = 0
+    local_override_count: int = 0
+    local_override_actions: tuple[str, ...] = ()
+    local_override_target_cells: tuple[tuple[int, int], ...] = ()
+    local_override_unsafe_human_indices: tuple[tuple[int, ...], ...] = ()
+    candidate_actions_evaluated: int = 0
+    candidate_actions_safe: int = 0
+    shield_trigger_reasons: tuple[str, ...] = ()
+    shield_min_predicted_separation: float | None = None
+    post_override_replans: int = 0
+    post_override_replan_successes: int = 0
+    post_override_replan_failures: int = 0
+    no_safe_local_action_events: int = 0
+    shield_collision_attributions: tuple[
+        ShieldCollisionAttribution, ...
+    ] = ()
 
 
 @dataclass(frozen=True)

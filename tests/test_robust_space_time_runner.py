@@ -51,8 +51,9 @@ def _scenario(
 
 
 def test_all_ten_old_methods_remain_in_their_original_order() -> None:
-    assert SUPPORTED_METHODS[:-1] == OLD_METHODS
-    assert SUPPORTED_METHODS[-1] == "social_spacetime_robust"
+    assert SUPPORTED_METHODS[:-2] == OLD_METHODS
+    assert SUPPORTED_METHODS[-2] == "social_spacetime_robust"
+    assert SUPPORTED_METHODS[-1] == "social_spacetime_shielded"
 
 
 def test_robust_method_is_accepted_and_deterministic() -> None:

@@ -30,6 +30,8 @@ from socialnav.planners.astar import astar
 from socialnav.planners.dynamic_avoidance import compute_speed_scale
 from socialnav.planners.space_time_planner import (
     SpaceTimePlan,
+    SpaceTimePlanningResult,
+    SpaceTimeSearchStatistics,
     duration_to_simulation_steps,
     space_time_social_astar,
 )
@@ -37,6 +39,10 @@ from socialnav.planners.space_time_planner import (
 from .diagnostics import EpisodeTrace, did_episode_time_out
 from .replanning import SustainedStopReplanPolicy, world_to_nearest_free_cell
 from .scenario import Scenario, build_scenario_grid
+from .space_time_diagnostics import (
+    SpaceTimePlanningCall,
+    build_space_time_planning_call,
+)
 
 SPACE_TIME_METHODS = (
     "social_spacetime",
@@ -99,9 +105,10 @@ def _plan(
     start: tuple[int, int],
     pedestrian: Pedestrian,
     max_time_seconds: float,
-) -> SpaceTimePlan | None:
+) -> tuple[SpaceTimePlan | None, SpaceTimePlanningResult]:
     grid_map = build_scenario_grid(scenario)
-    return space_time_social_astar(
+    diagnostic_results: list[SpaceTimePlanningResult] = []
+    plan = space_time_social_astar(
         grid_map,
         start,
         scenario.goal,
@@ -114,7 +121,42 @@ def _plan(
         scenario.grid_scale,
         ROBOT_SPEED,
         max_time_seconds,
+        diagnostic_results=diagnostic_results,
     )
+    planning_result = (
+        diagnostic_results[0]
+        if diagnostic_results
+        else _fallback_planning_result(plan)
+    )
+    return plan, planning_result
+
+
+def _fallback_planning_result(
+    plan: SpaceTimePlan | None,
+) -> SpaceTimePlanningResult:
+    """Keep monkeypatched planner tests compatible with diagnostic tracing."""
+    return SpaceTimePlanningResult(
+        plan=plan,
+        failure_reason=None if plan is not None else "other",
+        first_action_safety=(),
+        statistics=SpaceTimeSearchStatistics(
+            expanded_states=0,
+            generated_states=0,
+            maximum_time_index_reached=(
+                0
+                if plan is None
+                else max(state[2] for state in plan.timed_states)
+            ),
+            planning_horizon_reached=False,
+            open_set_exhausted=plan is None,
+            goal_reached=plan is not None,
+            returned_path_length=None if plan is None else len(plan.actions),
+            planned_wait_count=(
+                0 if plan is None else plan.planned_wait_actions
+            ),
+        ),
+    )
+
 
 
 def run_space_time_episode_with_trace(
@@ -141,12 +183,36 @@ def run_space_time_episode_with_trace(
         scenario.pedestrian_speed,
     )
     maximum_planning_seconds = max_steps * SIMULATION_STEP
-    current_plan = _plan(
+    start_position = grid_to_world(scenario.start, scenario.grid_scale)
+    current_plan, initial_planning_result = _plan(
         scenario,
         scenario.start,
         pedestrian,
         maximum_planning_seconds,
     )
+    planning_calls: list[SpaceTimePlanningCall] = [
+        build_space_time_planning_call(
+            scenario_id=scenario.scenario_id,
+            call_index=0,
+            is_initial_plan=True,
+            simulation_step=0,
+            simulated_episode_time=0.0,
+            remaining_episode_time=maximum_planning_seconds,
+            stopped_streak=0,
+            total_reactive_stopped_steps=0,
+            previous_successful_plan_step=None,
+            actual_robot_world_position=start_position,
+            mapped_robot_grid_cell=scenario.start,
+            pedestrian_position=pedestrian.position,
+            pedestrian_velocity=pedestrian.velocity,
+            pedestrian_target=pedestrian.target_position,
+            grid_scale=scenario.grid_scale,
+            move_duration=scenario.grid_scale / ROBOT_SPEED,
+            collision_distance=HUMAN_COLLISION_DISTANCE,
+            planning_result=initial_planning_result,
+        )
+    ]
+    previous_successful_plan_step = 0 if current_plan is not None else None
     selected_plan = current_plan
     spacetime_plan_count = 1
     spacetime_planning_failures = int(current_plan is None)
@@ -271,17 +337,49 @@ def run_space_time_episode_with_trace(
                             scenario.grid_scale,
                         )
                         spacetime_plan_count += 1
-                        replanned = _plan(
+                        replanned, planning_result = _plan(
                             scenario,
                             replan_start,
                             pedestrian,
                             maximum_planning_seconds,
+                        )
+                        call_step = steps + 1
+                        planning_calls.append(
+                            build_space_time_planning_call(
+                                scenario_id=scenario.scenario_id,
+                                call_index=len(planning_calls),
+                                is_initial_plan=False,
+                                simulation_step=call_step,
+                                simulated_episode_time=steps * SIMULATION_STEP,
+                                remaining_episode_time=(
+                                    (max_steps - steps) * SIMULATION_STEP
+                                ),
+                                stopped_streak=replan_stop_steps,
+                                total_reactive_stopped_steps=(
+                                    reactive_stopped_steps
+                                ),
+                                previous_successful_plan_step=(
+                                    previous_successful_plan_step
+                                ),
+                                actual_robot_world_position=(
+                                    current_robot_position
+                                ),
+                                mapped_robot_grid_cell=replan_start,
+                                pedestrian_position=pedestrian.position,
+                                pedestrian_velocity=pedestrian.velocity,
+                                pedestrian_target=pedestrian.target_position,
+                                grid_scale=scenario.grid_scale,
+                                move_duration=scenario.grid_scale / ROBOT_SPEED,
+                                collision_distance=HUMAN_COLLISION_DISTANCE,
+                                planning_result=planning_result,
+                            )
                         )
                         if replanned is None:
                             failed_replans += 1
                             spacetime_planning_failures += 1
                         else:
                             successful_replans += 1
+                            previous_successful_plan_step = call_step
                             current_plan = replanned
                             selected_plan = replanned
                             planned_wait_actions += (
@@ -390,6 +488,7 @@ def run_space_time_episode_with_trace(
             spacetime_plan_count=spacetime_plan_count,
             spacetime_planning_failures=spacetime_planning_failures,
             total_intentional_wait_steps=total_intentional_wait_steps,
+            space_time_planning_calls=tuple(planning_calls),
             reactive_stopped_steps=reactive_stopped_steps,
         )
         return result, trace

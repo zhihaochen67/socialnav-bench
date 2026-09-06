@@ -17,6 +17,21 @@ from socialnav.planners.social_cost import compute_social_cost
 
 State = tuple[int, int, int]
 SpaceTimeAction = Literal["UP", "RIGHT", "DOWN", "LEFT", "WAIT"]
+SpaceTimeFailureReason = Literal[
+    "invalid_start",
+    "invalid_goal",
+    "start_in_predicted_collision",
+    "no_safe_first_action",
+    "search_exhausted",
+    "time_horizon_exhausted",
+    "goal_unreachable_static",
+    "other",
+]
+SpaceTimeActionRejectionReason = Literal[
+    "outside_map",
+    "obstacle",
+    "predicted_collision",
+]
 Position = tuple[float, float]
 
 _ACTIONS: tuple[tuple[SpaceTimeAction, Coordinate], ...] = (
@@ -39,6 +54,46 @@ class SpaceTimePlan:
     planned_move_actions: int
     move_duration: float
     estimated_duration: float
+
+
+@dataclass(frozen=True)
+class SpaceTimeActionSafety:
+    """Deterministic evidence for one possible first action."""
+
+    action: SpaceTimeAction
+    destination: Coordinate
+    inside_map: bool
+    free: bool
+    predicted_separation_start: float
+    predicted_separation_midpoint: float
+    predicted_separation_end: float
+    minimum_predicted_separation: float
+    rejected_by_collision_constraint: bool
+    rejection_reason: SpaceTimeActionRejectionReason | None
+
+
+@dataclass(frozen=True)
+class SpaceTimeSearchStatistics:
+    """Counters describing one space-time search without affecting it."""
+
+    expanded_states: int
+    generated_states: int
+    maximum_time_index_reached: int
+    planning_horizon_reached: bool
+    open_set_exhausted: bool
+    goal_reached: bool
+    returned_path_length: int | None
+    planned_wait_count: int
+
+
+@dataclass(frozen=True)
+class SpaceTimePlanningResult:
+    """Plan plus deterministic evidence explaining success or failure."""
+
+    plan: SpaceTimePlan | None
+    failure_reason: SpaceTimeFailureReason | None
+    first_action_safety: tuple[SpaceTimeActionSafety, ...]
+    statistics: SpaceTimeSearchStatistics
 
 
 def duration_to_simulation_steps(duration: float, dt: float) -> int:
@@ -102,10 +157,93 @@ def is_space_time_action_safe(
     if collision_distance <= 0.0:
         raise ValueError("collision_distance must be positive")
 
+    return all(
+        separation > collision_distance
+        for separation in _space_time_action_separations(
+            start,
+            end,
+            start_time_index,
+            pedestrian_position=pedestrian_position,
+            pedestrian_velocity=pedestrian_velocity,
+            pedestrian_target=pedestrian_target,
+            move_duration=move_duration,
+            grid_scale=grid_scale,
+        )
+    )
+
+
+def inspect_space_time_first_actions(
+    grid_map: GridMap,
+    start: Coordinate,
+    *,
+    pedestrian_position: Position,
+    pedestrian_velocity: Position,
+    pedestrian_target: Position | None,
+    move_duration: float,
+    grid_scale: float,
+    collision_distance: float,
+) -> tuple[SpaceTimeActionSafety, ...]:
+    """Describe map validity and timed separation for all five actions."""
+    details = []
+    for action, (delta_x, delta_y) in _ACTIONS:
+        destination = (start[0] + delta_x, start[1] + delta_y)
+        inside_map = grid_map.is_inside(destination)
+        free = inside_map and grid_map.is_free(destination)
+        separations = _space_time_action_separations(
+            start,
+            destination,
+            0,
+            pedestrian_position=pedestrian_position,
+            pedestrian_velocity=pedestrian_velocity,
+            pedestrian_target=pedestrian_target,
+            move_duration=move_duration,
+            grid_scale=grid_scale,
+        )
+        minimum_separation = min(separations)
+        collision_rejection = minimum_separation <= collision_distance
+        if not inside_map:
+            rejection_reason: SpaceTimeActionRejectionReason | None = (
+                "outside_map"
+            )
+        elif not free:
+            rejection_reason = "obstacle"
+        elif collision_rejection:
+            rejection_reason = "predicted_collision"
+        else:
+            rejection_reason = None
+        details.append(
+            SpaceTimeActionSafety(
+                action=action,
+                destination=destination,
+                inside_map=inside_map,
+                free=free,
+                predicted_separation_start=separations[0],
+                predicted_separation_midpoint=separations[1],
+                predicted_separation_end=separations[2],
+                minimum_predicted_separation=minimum_separation,
+                rejected_by_collision_constraint=collision_rejection,
+                rejection_reason=rejection_reason,
+            )
+        )
+    return tuple(details)
+
+
+def _space_time_action_separations(
+    start: Coordinate,
+    end: Coordinate,
+    start_time_index: int,
+    *,
+    pedestrian_position: Position,
+    pedestrian_velocity: Position,
+    pedestrian_target: Position | None,
+    move_duration: float,
+    grid_scale: float,
+) -> tuple[float, float, float]:
     start_world = grid_to_world(start, grid_scale)
     end_world = grid_to_world(end, grid_scale)
     start_time = start_time_index * move_duration
 
+    separations = []
     for fraction in (0.0, 0.5, 1.0):
         robot_position = (
             start_world[0] + (end_world[0] - start_world[0]) * fraction,
@@ -117,13 +255,13 @@ def is_space_time_action_safe(
             start_time + move_duration * fraction,
             target=pedestrian_target,
         )
-        if hypot(
-            robot_position[0] - pedestrian_at_time[0],
-            robot_position[1] - pedestrian_at_time[1],
-        ) <= collision_distance:
-            return False
-
-    return True
+        separations.append(
+            hypot(
+                robot_position[0] - pedestrian_at_time[0],
+                robot_position[1] - pedestrian_at_time[1],
+            )
+        )
+    return separations[0], separations[1], separations[2]
 
 
 def space_time_social_astar(
@@ -139,10 +277,46 @@ def space_time_social_astar(
     grid_scale: float,
     robot_speed: float,
     max_time_seconds: float,
+    *,
+    diagnostic_results: list[SpaceTimePlanningResult] | None = None,
 ) -> SpaceTimePlan | None:
     """Plan in (x, y, time_index) using time-aligned pedestrian occupancy."""
     _validate_endpoint(grid_map, start, "start")
     _validate_endpoint(grid_map, goal, "goal")
+    result = diagnose_space_time_social_astar(
+        grid_map,
+        start,
+        goal,
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        social_distance,
+        social_weight,
+        collision_distance,
+        grid_scale,
+        robot_speed,
+        max_time_seconds,
+    )
+    if diagnostic_results is not None:
+        diagnostic_results.append(result)
+    return result.plan
+
+
+def diagnose_space_time_social_astar(
+    grid_map: GridMap,
+    start: Coordinate,
+    goal: Coordinate,
+    pedestrian_position: Position,
+    pedestrian_velocity: Position,
+    pedestrian_target: Position | None,
+    social_distance: float,
+    social_weight: float,
+    collision_distance: float,
+    grid_scale: float,
+    robot_speed: float,
+    max_time_seconds: float,
+) -> SpaceTimePlanningResult:
+    """Run the unchanged search and return deterministic diagnostic evidence."""
     if social_distance <= 0.0:
         raise ValueError("social_distance must be positive")
     if social_weight < 0.0:
@@ -158,9 +332,44 @@ def space_time_social_astar(
 
     move_duration = grid_scale / robot_speed
     max_time_index = floor(max_time_seconds / move_duration)
+    empty_statistics = SpaceTimeSearchStatistics(
+        expanded_states=0,
+        generated_states=0,
+        maximum_time_index_reached=0,
+        planning_horizon_reached=False,
+        open_set_exhausted=False,
+        goal_reached=False,
+        returned_path_length=None,
+        planned_wait_count=0,
+    )
+    if not grid_map.is_inside(start) or not grid_map.is_free(start):
+        return SpaceTimePlanningResult(
+            plan=None,
+            failure_reason="invalid_start",
+            first_action_safety=(),
+            statistics=empty_statistics,
+        )
+    if not grid_map.is_inside(goal) or not grid_map.is_free(goal):
+        return SpaceTimePlanningResult(
+            plan=None,
+            failure_reason="invalid_goal",
+            first_action_safety=(),
+            statistics=empty_statistics,
+        )
+
+    first_action_safety = inspect_space_time_first_actions(
+        grid_map,
+        start,
+        pedestrian_position=pedestrian_position,
+        pedestrian_velocity=pedestrian_velocity,
+        pedestrian_target=pedestrian_target,
+        move_duration=move_duration,
+        grid_scale=grid_scale,
+        collision_distance=collision_distance,
+    )
     start_state: State = (start[0], start[1], 0)
     if start == goal:
-        return SpaceTimePlan(
+        plan = SpaceTimePlan(
             spatial_path=(start,),
             timed_states=(start_state,),
             actions=(),
@@ -168,6 +377,21 @@ def space_time_social_astar(
             planned_move_actions=0,
             move_duration=move_duration,
             estimated_duration=0.0,
+        )
+        return SpaceTimePlanningResult(
+            plan=plan,
+            failure_reason=None,
+            first_action_safety=first_action_safety,
+            statistics=SpaceTimeSearchStatistics(
+                expanded_states=1,
+                generated_states=1,
+                maximum_time_index_reached=0,
+                planning_horizon_reached=max_time_index == 0,
+                open_set_exhausted=False,
+                goal_reached=True,
+                returned_path_length=0,
+                planned_wait_count=0,
+            ),
         )
 
     tie_breaker = count()
@@ -178,19 +402,44 @@ def space_time_social_astar(
     )
     cost_so_far = {start_state: 0.0}
     came_from: dict[State, tuple[State, SpaceTimeAction]] = {}
+    expanded_states = 0
+    generated_states = 1
+    maximum_time_index_reached = 0
 
     while frontier:
         _, _, current_cost, current = heappop(frontier)
         if current_cost != cost_so_far[current]:
             continue
+        expanded_states += 1
+        maximum_time_index_reached = max(
+            maximum_time_index_reached,
+            current[2],
+        )
 
         current_coordinate = (current[0], current[1])
         if current_coordinate == goal:
-            return _reconstruct_plan(
+            plan = _reconstruct_plan(
                 came_from,
                 start_state,
                 current,
                 move_duration,
+            )
+            return SpaceTimePlanningResult(
+                plan=plan,
+                failure_reason=None,
+                first_action_safety=first_action_safety,
+                statistics=SpaceTimeSearchStatistics(
+                    expanded_states=expanded_states,
+                    generated_states=generated_states,
+                    maximum_time_index_reached=maximum_time_index_reached,
+                    planning_horizon_reached=(
+                        maximum_time_index_reached >= max_time_index
+                    ),
+                    open_set_exhausted=False,
+                    goal_reached=True,
+                    returned_path_length=len(plan.actions),
+                    planned_wait_count=plan.planned_wait_actions,
+                ),
             )
         if current[2] >= max_time_index:
             continue
@@ -233,13 +482,81 @@ def space_time_social_astar(
 
             cost_so_far[next_state] = new_cost
             came_from[next_state] = (current, action)
+            generated_states += 1
+            maximum_time_index_reached = max(
+                maximum_time_index_reached,
+                next_state[2],
+            )
             priority = new_cost + _manhattan(neighbor, goal)
             heappush(
                 frontier,
                 (priority, next(tie_breaker), new_cost, next_state),
             )
 
-    return None
+    planning_horizon_reached = (
+        maximum_time_index_reached >= max_time_index
+    )
+    start_world = grid_to_world(start, grid_scale)
+    start_separation = hypot(
+        start_world[0] - pedestrian_position[0],
+        start_world[1] - pedestrian_position[1],
+    )
+    has_safe_first_action = any(
+        detail.rejection_reason is None for detail in first_action_safety
+    )
+    if start_separation <= collision_distance:
+        failure_reason: SpaceTimeFailureReason = (
+            "start_in_predicted_collision"
+        )
+    elif not has_safe_first_action:
+        failure_reason = "no_safe_first_action"
+    elif not _is_static_goal_reachable(grid_map, start, goal):
+        failure_reason = "goal_unreachable_static"
+    elif planning_horizon_reached:
+        failure_reason = "time_horizon_exhausted"
+    elif expanded_states > 0:
+        failure_reason = "search_exhausted"
+    else:
+        failure_reason = "other"
+
+    return SpaceTimePlanningResult(
+        plan=None,
+        failure_reason=failure_reason,
+        first_action_safety=first_action_safety,
+        statistics=SpaceTimeSearchStatistics(
+            expanded_states=expanded_states,
+            generated_states=generated_states,
+            maximum_time_index_reached=maximum_time_index_reached,
+            planning_horizon_reached=planning_horizon_reached,
+            open_set_exhausted=True,
+            goal_reached=False,
+            returned_path_length=None,
+            planned_wait_count=0,
+        ),
+    )
+
+
+def _is_static_goal_reachable(
+    grid_map: GridMap,
+    start: Coordinate,
+    goal: Coordinate,
+) -> bool:
+    frontier = [start]
+    visited = {start}
+    while frontier:
+        current = frontier.pop()
+        if current == goal:
+            return True
+        for _, (delta_x, delta_y) in _ACTIONS[:-1]:
+            neighbor = (current[0] + delta_x, current[1] + delta_y)
+            if (
+                neighbor not in visited
+                and grid_map.is_inside(neighbor)
+                and grid_map.is_free(neighbor)
+            ):
+                visited.add(neighbor)
+                frontier.append(neighbor)
+    return False
 
 
 def _validate_endpoint(

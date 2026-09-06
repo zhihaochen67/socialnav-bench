@@ -11,6 +11,7 @@ from socialnav.evaluation import EpisodeResult
 from socialnav.metrics import Position
 
 from .scenario import Scenario
+from .space_time_diagnostics import SpaceTimePlanningCall
 
 STOPPED_SPEED_TOLERANCE = 1e-12
 PATH_NEAR_THRESHOLD = STOP_DISTANCE
@@ -45,6 +46,7 @@ class EpisodeTrace:
     spacetime_planning_failures: int = 0
     total_intentional_wait_steps: int = 0
     reactive_stopped_steps: int = 0
+    space_time_planning_calls: tuple[SpaceTimePlanningCall, ...] = ()
 
 
 @dataclass(frozen=True)

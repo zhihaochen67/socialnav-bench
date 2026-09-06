@@ -52,6 +52,10 @@ from .replanning import (
     interpolate_replanned_route,
     world_to_nearest_free_cell,
 )
+from .robust_space_time_runner import (
+    ROBUST_SPACE_TIME_METHOD,
+    run_robust_space_time_episode_with_trace,
+)
 from .scenario import Scenario, build_scenario_grid
 from .space_time_runner import (
     SPACE_TIME_METHODS,
@@ -69,6 +73,7 @@ SUPPORTED_METHODS = (
     "social_predictive_replan",
     "social_spacetime",
     "social_spacetime_replan",
+    "social_spacetime_robust",
 )
 MAX_EPISODE_SECONDS = 20.0
 MAX_EPISODE_STEPS = int(MAX_EPISODE_SECONDS / SIMULATION_STEP)
@@ -194,10 +199,19 @@ def run_episode_with_trace(
             "social_replan_recovery",
             "social_predictive_replan",
             "social_spacetime_replan",
+            "social_spacetime_robust",
         )
         and replan_stop_steps <= 0
     ):
         raise ValueError("replan_stop_steps must be positive")
+
+    if method == ROBUST_SPACE_TIME_METHOD:
+        return run_robust_space_time_episode_with_trace(
+            scenario,
+            method,
+            max_steps=max_steps,
+            replan_stop_steps=replan_stop_steps,
+        )
 
     if method in SPACE_TIME_METHODS:
         return run_space_time_episode_with_trace(

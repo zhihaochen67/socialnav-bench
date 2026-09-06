@@ -47,6 +47,23 @@ class EpisodeTrace:
     total_intentional_wait_steps: int = 0
     reactive_stopped_steps: int = 0
     space_time_planning_calls: tuple[SpaceTimePlanningCall, ...] = ()
+    continuous_bridge_attempts: int = 0
+    continuous_bridge_successes: int = 0
+    continuous_bridge_failures: int = 0
+    bridge_target_cells: tuple[tuple[int, int], ...] = ()
+    bridge_distances: tuple[float, ...] = ()
+    bridge_min_predicted_separations: tuple[float, ...] = ()
+    collision_egress_attempts: int = 0
+    collision_egress_successes: int = 0
+    collision_egress_failures: int = 0
+    progress_stall_events: int = 0
+    exact_zero_stall_events: int = 0
+    suppressed_duplicate_replans: int = 0
+    robust_replan_count: int = 0
+    robust_replan_successes: int = 0
+    robust_replan_failures: int = 0
+    robust_planning_failure_reasons: tuple[str, ...] = ()
+    robust_episode_failure_reason: str | None = None
 
 
 @dataclass(frozen=True)

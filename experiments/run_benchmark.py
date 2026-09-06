@@ -1,4 +1,4 @@
-"""Run the reproducible ten-method SocialNav benchmark."""
+"""Run the reproducible eleven-method SocialNav benchmark."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from socialnav.benchmark import (  # noqa: E402
     generate_diverse_scenarios,
     generate_scenarios,
     run_episode_with_trace,
+    summarize_robust_execution,
 )
 from socialnav.env.world import (  # noqa: E402
     HUMAN_COLLISION_DISTANCE,
@@ -51,6 +52,7 @@ _METHOD_LABELS = {
     "social_predictive_replan": "Predictive Social Replan",
     "social_spacetime": "Space-Time Social",
     "social_spacetime_replan": "Space-Time Social Replan",
+    "social_spacetime_robust": "Robust Space-Time Social",
 }
 _SCENARIO_MODES = ("controlled", "diverse")
 
@@ -253,6 +255,32 @@ def main() -> None:
                 * SIMULATION_STEP
                 / spacetime_move_duration
             ),
+            "robust_bridge_candidate_rule": (
+                "nearest free mapped cell plus its four-connected local cells"
+            ),
+            "robust_bridge_duration_rule": (
+                "euclidean distance / robot_speed"
+            ),
+            "robust_bridge_tie_breaking": [
+                "safe",
+                "smaller_bridge_distance",
+                "greater_minimum_human_separation",
+                "lower_x",
+                "lower_y",
+            ],
+            "robust_prediction_time_rule": (
+                "bridge_duration + grid_time_index * move_duration"
+            ),
+            "robust_egress_tolerance": 1e-12,
+            "robust_stall_window_steps": REPLAN_STOP_STEPS,
+            "robust_progress_threshold_rule": (
+                "robot_speed * simulation_dt"
+            ),
+            "robust_progress_threshold_meters": (
+                ROBOT_SPEED * SIMULATION_STEP
+            ),
+            "robust_stall_comparison": "displacement < threshold",
+            "robust_duplicate_state_quantization": 0.001,
             "methods": {
                 "astar": "ordinary A* without reactive avoidance",
                 "dynamic": "ordinary A* with reactive avoidance",
@@ -283,6 +311,11 @@ def main() -> None:
                     "time-expanded social A* with explicit MOVE/WAIT actions, "
                     "reactive movement safety, and sustained-stop replanning"
                 ),
+                "social_spacetime_robust": (
+                    "continuous-start time-expanded social A* with safe "
+                    "collision egress, progress-aware replanning, duplicate "
+                    "suppression, and direction-aware execution"
+                ),
             },
         },
         "scenarios": [asdict(scenario) for scenario in scenarios],
@@ -298,6 +331,15 @@ def main() -> None:
                 "spacetime": _summarize_spacetime(
                     results_by_method[method],
                     traces_by_method[method],
+                ),
+                "robust": (
+                    summarize_robust_execution(
+                        scenarios,
+                        results_by_method[method],
+                        traces_by_method[method],
+                    )
+                    if method == "social_spacetime_robust"
+                    else None
                 ),
                 "episodes": [
                     {
@@ -342,6 +384,23 @@ def main() -> None:
                             "reactive_stopped_steps": (
                                 trace.reactive_stopped_steps
                             ),
+                            "continuous_bridge_attempts": trace.continuous_bridge_attempts,
+                            "continuous_bridge_successes": trace.continuous_bridge_successes,
+                            "continuous_bridge_failures": trace.continuous_bridge_failures,
+                            "bridge_target_cells": list(trace.bridge_target_cells),
+                            "bridge_distances": list(trace.bridge_distances),
+                            "bridge_min_predicted_separations": list(trace.bridge_min_predicted_separations),
+                            "collision_egress_attempts": trace.collision_egress_attempts,
+                            "collision_egress_successes": trace.collision_egress_successes,
+                            "collision_egress_failures": trace.collision_egress_failures,
+                            "progress_stall_events": trace.progress_stall_events,
+                            "exact_zero_stall_events": trace.exact_zero_stall_events,
+                            "suppressed_duplicate_replans": trace.suppressed_duplicate_replans,
+                            "robust_replan_count": trace.robust_replan_count,
+                            "robust_replan_successes": trace.robust_replan_successes,
+                            "robust_replan_failures": trace.robust_replan_failures,
+                            "robust_planning_failure_reasons": list(trace.robust_planning_failure_reasons),
+                            "robust_episode_failure_reason": trace.robust_episode_failure_reason,
                         },
                     }
                     for scenario, result, trace in zip(

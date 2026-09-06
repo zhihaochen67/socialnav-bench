@@ -208,6 +208,7 @@ def test_supported_method_order_includes_space_time_methods_last() -> None:
         "social_predictive_replan",
         "social_spacetime",
         "social_spacetime_replan",
+        "social_spacetime_robust",
     )
 
 

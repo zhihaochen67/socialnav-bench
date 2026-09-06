@@ -64,6 +64,15 @@ class EpisodeTrace:
     robust_replan_failures: int = 0
     robust_planning_failure_reasons: tuple[str, ...] = ()
     robust_episode_failure_reason: str | None = None
+    pedestrian_count: int = 1
+    initial_pedestrian_positions: tuple[Position, ...] = ()
+    initial_pedestrian_velocities: tuple[Position, ...] = ()
+    pedestrian_targets: tuple[Position, ...] = ()
+    final_pedestrian_positions: tuple[Position, ...] = ()
+    per_human_minimum_distances: tuple[float | None, ...] = ()
+    collision_human_indices: tuple[int, ...] = ()
+    blocking_human_indices: tuple[int, ...] = ()
+    minimum_predicted_separation: float | None = None
 
 
 @dataclass(frozen=True)

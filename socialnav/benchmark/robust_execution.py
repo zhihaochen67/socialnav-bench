@@ -8,7 +8,10 @@ from typing import Literal
 
 from socialnav.env.grid_map import Coordinate
 from socialnav.metrics import Position
-from socialnav.planners.pedestrian_prediction import PREDICTION_EPSILON
+from socialnav.planners.pedestrian_prediction import (
+    PREDICTION_EPSILON,
+    PedestrianPredictionState,
+)
 
 from .space_time_diagnostics import REPEATED_STATE_QUANTIZATION
 
@@ -92,9 +95,21 @@ class FailedReplanSignature:
     pedestrian_velocity: tuple[int, int]
     pedestrian_at_target: bool
     failure_reason: str
+    pedestrian_states: tuple[
+        tuple[tuple[int, int], tuple[int, int], bool], ...
+    ] = ()
 
     @property
     def state_key(self) -> tuple[object, ...]:
+        if self.pedestrian_states:
+            return (
+                self.mapped_start,
+                self.robot_position,
+                self.pedestrian_position,
+                self.pedestrian_velocity,
+                self.pedestrian_at_target,
+                self.pedestrian_states,
+            )
         return (
             self.mapped_start,
             self.robot_position,
@@ -123,6 +138,7 @@ class FailedReplanSuppressor:
         pedestrian_position: Position,
         pedestrian_velocity: Position,
         pedestrian_target: Position,
+        pedestrian_states: tuple[PedestrianPredictionState, ...] = (),
     ) -> bool:
         """Return whether the current state matches the last failed search."""
         if self.last_failed_signature is None:
@@ -133,6 +149,7 @@ class FailedReplanSuppressor:
             pedestrian_position=pedestrian_position,
             pedestrian_velocity=pedestrian_velocity,
             pedestrian_target=pedestrian_target,
+            pedestrian_states=pedestrian_states,
         )
 
     def record_failure(
@@ -144,6 +161,7 @@ class FailedReplanSuppressor:
         pedestrian_velocity: Position,
         pedestrian_target: Position,
         failure_reason: str,
+        pedestrian_states: tuple[PedestrianPredictionState, ...] = (),
     ) -> None:
         """Record the one deterministic failure eligible for suppression."""
         state_key = self._state_key(
@@ -152,6 +170,7 @@ class FailedReplanSuppressor:
             pedestrian_position=pedestrian_position,
             pedestrian_velocity=pedestrian_velocity,
             pedestrian_target=pedestrian_target,
+            pedestrian_states=pedestrian_states,
         )
         self.last_failed_signature = FailedReplanSignature(
             mapped_start=state_key[0],
@@ -160,6 +179,7 @@ class FailedReplanSuppressor:
             pedestrian_velocity=state_key[3],
             pedestrian_at_target=state_key[4],
             failure_reason=failure_reason,
+            pedestrian_states=state_key[5] if len(state_key) > 5 else (),
         )
 
     def record_success(self) -> None:
@@ -174,23 +194,44 @@ class FailedReplanSuppressor:
         pedestrian_position: Position,
         pedestrian_velocity: Position,
         pedestrian_target: Position,
-    ) -> tuple[
-        Coordinate,
-        tuple[int, int],
-        tuple[int, int],
-        tuple[int, int],
-        bool,
-    ]:
+        pedestrian_states: tuple[PedestrianPredictionState, ...] = (),
+    ) -> tuple[object, ...]:
+        primary_at_target = self._at_target(
+            pedestrian_position,
+            pedestrian_target,
+        )
+        if pedestrian_states:
+            quantized_states = tuple(
+                (
+                    self._quantize(position),
+                    self._quantize(velocity),
+                    self._at_target(position, target),
+                )
+                for position, velocity, target in pedestrian_states
+            )
+            return (
+                mapped_start,
+                self._quantize(robot_position),
+                self._quantize(pedestrian_position),
+                self._quantize(pedestrian_velocity),
+                primary_at_target,
+                quantized_states,
+            )
         return (
             mapped_start,
             self._quantize(robot_position),
             self._quantize(pedestrian_position),
             self._quantize(pedestrian_velocity),
+            primary_at_target,
+        )
+
+    def _at_target(self, position: Position, target: Position) -> bool:
+        return (
             hypot(
-                pedestrian_position[0] - pedestrian_target[0],
-                pedestrian_position[1] - pedestrian_target[1],
+                position[0] - target[0],
+                position[1] - target[1],
             )
-            <= PREDICTION_EPSILON,
+            <= PREDICTION_EPSILON
         )
 
     def _quantize(self, position: Position) -> tuple[int, int]:

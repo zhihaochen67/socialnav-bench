@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from heapq import heappop, heappush
 from itertools import count
-from math import floor, hypot
+from math import floor, hypot, inf
 from typing import Literal
 
 from socialnav.env.demo_map import grid_to_world
@@ -16,6 +17,7 @@ from socialnav.planners.directional_avoidance import (
     is_separation_increasing,
 )
 from socialnav.planners.pedestrian_prediction import (
+    PedestrianPredictionState,
     predict_pedestrian_position_at_time,
 )
 from socialnav.planners.social_cost import compute_social_cost
@@ -27,6 +29,7 @@ from socialnav.planners.space_time_planner import (
     SpaceTimePlanningResult,
     SpaceTimeSearchStatistics,
     State,
+    _collect_pedestrian_states,
 )
 
 RobustPlanningFailureReason = Literal[
@@ -114,19 +117,66 @@ class RobustSpaceTimePlanningResult:
     grid_planning_result: SpaceTimePlanningResult | None
 
 
+def is_multi_collision_egress_motion_safe(
+    start_position: Position,
+    end_position: Position,
+    humans: Iterable[tuple[Position, tuple[float, float, float]]],
+    collision_distance: float,
+    *,
+    tolerance: float = EGRESS_SEPARATION_TOLERANCE,
+) -> bool:
+    """Require monotonic escape from every colliding human and safety from
+    every currently-safe human.
+
+    Each ``humans`` entry is ``(pedestrian_at_start, separations)``.  A
+    currently-colliding pedestrian must pass the existing single-human
+    strictly-increasing egress test; a currently-safe pedestrian must keep
+    every sampled separation above the collision distance.  Never allow an
+    escape from pedestrian A that creates a collision with pedestrian B.
+    """
+    if collision_distance <= 0.0:
+        raise ValueError("collision_distance must be positive")
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be non-negative")
+
+    for pedestrian_at_start, separations in humans:
+        start_separation = separations[0]
+        if start_separation <= collision_distance:
+            if not is_collision_egress_motion_safe(
+                start_position,
+                end_position,
+                pedestrian_at_start,
+                separations,
+                collision_distance,
+                tolerance=tolerance,
+            ):
+                return False
+        elif not all(
+            separation > collision_distance for separation in separations
+        ):
+            return False
+    return True
+
+
 def build_continuous_start_transitions(
     grid_map: GridMap,
     actual_start_position: Position,
     mapped_start: Coordinate,
     *,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     grid_scale: float,
     robot_speed: float,
     collision_distance: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> tuple[BridgeCandidateEvaluation, ...]:
-    """Evaluate the mapped cell and its four neighbors without broad search."""
+    """Evaluate the mapped cell and its four neighbors without broad search.
+
+    Every candidate is checked against every pedestrian; the reported
+    separations are the minimum across all pedestrians at each of the three
+    time-aligned samples.
+    """
     if grid_scale <= 0.0:
         raise ValueError("grid_scale must be positive")
     if robot_speed <= 0.0:
@@ -134,6 +184,13 @@ def build_continuous_start_transitions(
     if collision_distance <= 0.0:
         raise ValueError("collision_distance must be positive")
 
+    additional = tuple(additional_pedestrians)
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional,
+    )
     candidate_cells = tuple(
         sorted(
             {
@@ -142,11 +199,14 @@ def build_continuous_start_transitions(
             }
         )
     )
-    start_separation = hypot(
-        actual_start_position[0] - pedestrian_position[0],
-        actual_start_position[1] - pedestrian_position[1],
+    starts_unsafe = any(
+        hypot(
+            actual_start_position[0] - position[0],
+            actual_start_position[1] - position[1],
+        )
+        <= collision_distance
+        for position, _, _ in pedestrians
     )
-    starts_unsafe = start_separation <= collision_distance
     evaluations = tuple(
         _evaluate_bridge_candidate(
             grid_map,
@@ -159,6 +219,7 @@ def build_continuous_start_transitions(
             robot_speed=robot_speed,
             collision_distance=collision_distance,
             collision_egress=starts_unsafe,
+            additional_pedestrians=additional,
         )
         for candidate in candidate_cells
     )
@@ -271,7 +332,7 @@ def robust_space_time_social_astar(
     actual_start_position: Position,
     mapped_start: Coordinate,
     goal: Coordinate,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     social_distance: float,
@@ -280,11 +341,24 @@ def robust_space_time_social_astar(
     grid_scale: float,
     robot_speed: float,
     max_time_seconds: float,
+    *,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> RobustSpaceTimePlanningResult:
-    """Bridge from the continuous pose, then search with its time offset."""
+    """Bridge from the continuous pose, then search with its time offset.
+
+    With no additional pedestrians this reproduces the original
+    single-human robust planner.
+    """
     if max_time_seconds < 0.0:
         raise ValueError("max_time_seconds must be non-negative")
 
+    additional = tuple(additional_pedestrians)
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional,
+    )
     evaluations = build_continuous_start_transitions(
         grid_map,
         actual_start_position,
@@ -295,15 +369,20 @@ def robust_space_time_social_astar(
         grid_scale=grid_scale,
         robot_speed=robot_speed,
         collision_distance=collision_distance,
+        additional_pedestrians=additional,
     )
     bridge = select_continuous_start_bridge(
         evaluations,
         actual_start_position,
     )
-    starts_unsafe = hypot(
-        actual_start_position[0] - pedestrian_position[0],
-        actual_start_position[1] - pedestrian_position[1],
-    ) <= collision_distance
+    starts_unsafe = any(
+        hypot(
+            actual_start_position[0] - position[0],
+            actual_start_position[1] - position[1],
+        )
+        <= collision_distance
+        for position, _, _ in pedestrians
+    )
     if bridge is None or bridge.duration > max_time_seconds:
         return RobustSpaceTimePlanningResult(
             plan=None,
@@ -330,6 +409,7 @@ def robust_space_time_social_astar(
         grid_scale=grid_scale,
         robot_speed=robot_speed,
         max_time_seconds=max_time_seconds,
+        additional_pedestrians=additional,
     )
     if grid_result.plan is None:
         first_actions = grid_result.first_action_safety
@@ -358,20 +438,19 @@ def robust_space_time_social_astar(
         bridge=bridge,
         grid_planning_result=grid_result,
     )
-
-
 def _evaluate_bridge_candidate(
     grid_map: GridMap,
     actual_start_position: Position,
     target_cell: Coordinate,
     *,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     grid_scale: float,
     robot_speed: float,
     collision_distance: float,
     collision_egress: bool,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> BridgeCandidateEvaluation:
     target_position = grid_to_world(target_cell, grid_scale)
     distance = hypot(
@@ -387,6 +466,7 @@ def _evaluate_bridge_candidate(
         pedestrian_velocity=pedestrian_velocity,
         pedestrian_target=pedestrian_target,
         start_time=0.0,
+        additional_pedestrians=additional_pedestrians,
     )
     static_valid = grid_map.is_inside(target_cell) and grid_map.is_free(
         target_cell
@@ -395,11 +475,31 @@ def _evaluate_bridge_candidate(
         safe = False
         rejection_reason: BridgeRejectionReason | None = "static_invalid"
     elif collision_egress:
-        safe = is_collision_egress_motion_safe(
+        pedestrians = _collect_pedestrian_states(
+            pedestrian_position,
+            pedestrian_velocity,
+            pedestrian_target,
+            additional_pedestrians,
+        )
+        humans = [
+            (
+                position,
+                _continuous_motion_separations(
+                    actual_start_position,
+                    target_position,
+                    duration,
+                    pedestrian_position=position,
+                    pedestrian_velocity=velocity,
+                    pedestrian_target=target,
+                    start_time=0.0,
+                ),
+            )
+            for position, velocity, target in pedestrians
+        ]
+        safe = is_multi_collision_egress_motion_safe(
             actual_start_position,
             target_position,
-            pedestrian_position,
-            separations,
+            humans,
             collision_distance,
         )
         rejection_reason = None if safe else "non_improving_egress"
@@ -430,32 +530,44 @@ def _continuous_motion_separations(
     end_position: Position,
     duration: float,
     *,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     start_time: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> tuple[float, float, float]:
-    separations = []
-    for fraction in (0.0, 0.5, 1.0):
-        robot_at_time = (
-            start_position[0]
-            + (end_position[0] - start_position[0]) * fraction,
-            start_position[1]
-            + (end_position[1] - start_position[1]) * fraction,
-        )
-        pedestrian_at_time = predict_pedestrian_position_at_time(
-            pedestrian_position,
-            pedestrian_velocity,
-            start_time + duration * fraction,
-            target=pedestrian_target,
-        )
-        separations.append(
-            hypot(
-                robot_at_time[0] - pedestrian_at_time[0],
-                robot_at_time[1] - pedestrian_at_time[1],
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional_pedestrians,
+    )
+    separations_by_fraction: list[list[float]] = [[], [], []]
+    for position, velocity, target in pedestrians:
+        for fraction_index, fraction in enumerate((0.0, 0.5, 1.0)):
+            robot_at_time = (
+                start_position[0]
+                + (end_position[0] - start_position[0]) * fraction,
+                start_position[1]
+                + (end_position[1] - start_position[1]) * fraction,
             )
-        )
-    return separations[0], separations[1], separations[2]
+            pedestrian_at_time = predict_pedestrian_position_at_time(
+                position,
+                velocity,
+                start_time + duration * fraction,
+                target=target,
+            )
+            separations_by_fraction[fraction_index].append(
+                hypot(
+                    robot_at_time[0] - pedestrian_at_time[0],
+                    robot_at_time[1] - pedestrian_at_time[1],
+                )
+            )
+    return (
+        min(separations_by_fraction[0], default=inf),
+        min(separations_by_fraction[1], default=inf),
+        min(separations_by_fraction[2], default=inf),
+    )
 
 
 def _inspect_grid_actions(
@@ -464,14 +576,21 @@ def _inspect_grid_actions(
     start_time_index: int,
     *,
     time_offset: float,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     move_duration: float,
     grid_scale: float,
     collision_distance: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> tuple[SpaceTimeActionSafety, ...]:
     start_position = grid_to_world(start, grid_scale)
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional_pedestrians,
+    )
     action_data = []
     for action, (delta_x, delta_y) in _ACTIONS:
         destination = (start[0] + delta_x, start[1] + delta_y)
@@ -487,21 +606,35 @@ def _inspect_grid_actions(
             pedestrian_velocity=pedestrian_velocity,
             pedestrian_target=pedestrian_target,
             start_time=start_time,
+            additional_pedestrians=additional_pedestrians,
         )
-        pedestrian_at_start = predict_pedestrian_position_at_time(
-            pedestrian_position,
-            pedestrian_velocity,
-            start_time,
-            target=pedestrian_target,
-        )
+        humans = [
+            (
+                predict_pedestrian_position_at_time(
+                    position,
+                    velocity,
+                    start_time,
+                    target=target,
+                ),
+                _continuous_motion_separations(
+                    start_position,
+                    destination_position,
+                    move_duration,
+                    pedestrian_position=position,
+                    pedestrian_velocity=velocity,
+                    pedestrian_target=target,
+                    start_time=start_time,
+                ),
+            )
+            for position, velocity, target in pedestrians
+        ]
         ordinary_safe = all(
             separation > collision_distance for separation in separations
         )
-        egress_safe = is_collision_egress_motion_safe(
+        egress_safe = is_multi_collision_egress_motion_safe(
             start_position,
             destination_position,
-            pedestrian_at_start,
-            separations,
+            humans,
             collision_distance,
         )
         temporal_safe = ordinary_safe or egress_safe
@@ -555,14 +688,12 @@ def _inspect_grid_actions(
             for detail, egress in action_data
         ]
     return tuple(detail for detail, _ in action_data)
-
-
 def _search_from_bridge(
     grid_map: GridMap,
     bridge: ContinuousStartBridge,
     goal: Coordinate,
     *,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     social_distance: float,
@@ -571,12 +702,20 @@ def _search_from_bridge(
     grid_scale: float,
     robot_speed: float,
     max_time_seconds: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> SpaceTimePlanningResult:
     if social_distance <= 0.0:
         raise ValueError("social_distance must be positive")
     if social_weight < 0.0:
         raise ValueError("social_weight must be non-negative")
 
+    additional = tuple(additional_pedestrians)
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional,
+    )
     start = bridge.target_cell
     move_duration = grid_scale / robot_speed
     max_time_index = floor(
@@ -612,6 +751,7 @@ def _search_from_bridge(
         move_duration=move_duration,
         grid_scale=grid_scale,
         collision_distance=collision_distance,
+        additional_pedestrians=additional,
     )
     start_state: State = (start[0], start[1], 0)
     if start == goal:
@@ -700,6 +840,7 @@ def _search_from_bridge(
             move_duration=move_duration,
             grid_scale=grid_scale,
             collision_distance=collision_distance,
+            additional_pedestrians=additional,
         )
         for detail in action_safety:
             if detail.rejection_reason is not None:
@@ -707,17 +848,19 @@ def _search_from_bridge(
             neighbor = detail.destination
             next_state: State = (neighbor[0], neighbor[1], current[2] + 1)
             arrival_time = bridge.duration + next_state[2] * move_duration
-            pedestrian_at_arrival = predict_pedestrian_position_at_time(
-                pedestrian_position,
-                pedestrian_velocity,
-                arrival_time,
-                target=pedestrian_target,
-            )
-            social_penalty = compute_social_cost(
-                grid_to_world(neighbor, grid_scale),
-                pedestrian_at_arrival,
-                social_distance,
-                social_weight,
+            social_penalty = sum(
+                compute_social_cost(
+                    grid_to_world(neighbor, grid_scale),
+                    predict_pedestrian_position_at_time(
+                        position,
+                        velocity,
+                        arrival_time,
+                        target=target,
+                    ),
+                    social_distance,
+                    social_weight,
+                )
+                for position, velocity, target in pedestrians
             )
             new_cost = current_cost + 1.0 + social_penalty
             if new_cost >= cost_so_far.get(next_state, float("inf")):

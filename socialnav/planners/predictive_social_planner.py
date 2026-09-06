@@ -10,6 +10,7 @@ from socialnav.env.grid_map import Coordinate, GridMap
 from socialnav.planners.astar import astar
 from socialnav.planners.pedestrian_prediction import (
     PREDICTION_HORIZONS,
+    PedestrianPredictionState,
     compute_predictive_social_cost,
     predict_pedestrian_positions,
 )
@@ -37,8 +38,15 @@ def predictive_social_astar(
     pedestrian_target: WorldPosition | None = None,
     horizons: Iterable[float] = PREDICTION_HORIZONS,
     temporal_weights: Iterable[float] | None = None,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> list[Coordinate] | None:
-    """Plan using decayed social costs at current and predicted positions."""
+    """Plan using decayed social costs at current and predicted positions.
+
+    Each pedestrian contributes its own independent current-and-predicted
+    social cost, and the candidate cost is the unnormalized sum across
+    pedestrians.  With no additional pedestrians this is the original
+    single-human planner unchanged.
+    """
     _validate_endpoint(grid_map, start, "start")
     _validate_endpoint(grid_map, goal, "goal")
     if social_distance <= 0.0:
@@ -47,17 +55,28 @@ def predictive_social_astar(
         raise ValueError("social_weight must be non-negative")
     if grid_scale <= 0.0:
         raise ValueError("grid_scale must be positive")
-    if pedestrian_position is None or social_weight == 0.0:
+
+    pedestrian_states: list[PedestrianPredictionState] = []
+    if pedestrian_position is not None:
+        pedestrian_states.append(
+            (pedestrian_position, pedestrian_velocity, pedestrian_target)
+        )
+    pedestrian_states.extend(additional_pedestrians)
+
+    if not pedestrian_states or social_weight == 0.0:
         return astar(grid_map, start, goal)
     if start == goal:
         return [start]
 
-    predicted_positions = predict_pedestrian_positions(
-        pedestrian_position,
-        pedestrian_velocity,
-        horizons,
-        target=pedestrian_target,
-    )
+    predicted_positions_by_pedestrian = [
+        predict_pedestrian_positions(
+            position,
+            velocity,
+            horizons,
+            target=target,
+        )
+        for position, velocity, target in pedestrian_states
+    ]
     resolved_temporal_weights = (
         None if temporal_weights is None else tuple(temporal_weights)
     )
@@ -91,13 +110,19 @@ def predictive_social_astar(
                 neighbor[0] * grid_scale,
                 neighbor[1] * grid_scale,
             )
-            social_penalty = compute_predictive_social_cost(
-                world_position,
-                pedestrian_position,
-                predicted_positions,
-                social_distance,
-                social_weight,
-                resolved_temporal_weights,
+            social_penalty = sum(
+                compute_predictive_social_cost(
+                    world_position,
+                    position,
+                    predicted_positions,
+                    social_distance,
+                    social_weight,
+                    resolved_temporal_weights,
+                )
+                for (position, _, _), predicted_positions in zip(
+                    pedestrian_states,
+                    predicted_positions_by_pedestrian,
+                )
             )
             new_cost = current_cost + 1.0 + social_penalty
             if new_cost >= cost_so_far.get(neighbor, float("inf")):

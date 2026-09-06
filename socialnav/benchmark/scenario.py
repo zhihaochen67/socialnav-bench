@@ -1,4 +1,4 @@
-"""Reproducible single-pedestrian benchmark scenarios."""
+"""Reproducible deterministic multi-pedestrian benchmark scenarios."""
 
 from dataclasses import dataclass
 from random import Random
@@ -35,8 +35,24 @@ _NEIGHBOR_OFFSETS: tuple[Coordinate, ...] = (
 
 
 @dataclass(frozen=True)
+class PedestrianSpec:
+    """Immutable independent straight-line motion for one pedestrian."""
+
+    start: Position
+    target: Position
+    speed: float
+
+
+@dataclass(frozen=True)
 class Scenario:
-    """All static inputs required to reproduce one benchmark episode."""
+    """All static inputs required to reproduce one benchmark episode.
+
+    ``pedestrians`` is the single source of truth for the pedestrian
+    population.  For backwards compatibility, single-human scenarios may
+    still be constructed with the legacy ``pedestrian_start``,
+    ``pedestrian_target``, and ``pedestrian_speed`` keyword arguments;
+    they are folded into a one-element ``pedestrians`` tuple.
+    """
 
     scenario_id: str
     grid_width: int
@@ -45,9 +61,78 @@ class Scenario:
     start: Coordinate
     goal: Coordinate
     grid_scale: float
-    pedestrian_start: Position
-    pedestrian_target: Position
-    pedestrian_speed: float
+    pedestrians: tuple[PedestrianSpec, ...] = ()
+
+    def __init__(
+        self,
+        scenario_id: str,
+        grid_width: int,
+        grid_height: int,
+        obstacle_cells: tuple[Coordinate, ...],
+        start: Coordinate,
+        goal: Coordinate,
+        grid_scale: float,
+        pedestrians: tuple[PedestrianSpec, ...] = (),
+        *,
+        pedestrian_start: Position | None = None,
+        pedestrian_target: Position | None = None,
+        pedestrian_speed: float | None = None,
+    ) -> None:
+        legacy_values = (
+            pedestrian_start,
+            pedestrian_target,
+            pedestrian_speed,
+        )
+        legacy_supplied = any(value is not None for value in legacy_values)
+        if pedestrians and legacy_supplied:
+            raise ValueError(
+                "pass either pedestrians= or the legacy pedestrian_start/"
+                "pedestrian_target/pedestrian_speed keywords, not both"
+            )
+        if legacy_supplied:
+            if not all(value is not None for value in legacy_values):
+                raise ValueError(
+                    "pedestrian_start, pedestrian_target, and "
+                    "pedestrian_speed must be supplied together"
+                )
+            assert pedestrian_start is not None
+            assert pedestrian_target is not None
+            assert pedestrian_speed is not None
+            pedestrians = (
+                PedestrianSpec(
+                    start=pedestrian_start,
+                    target=pedestrian_target,
+                    speed=pedestrian_speed,
+                ),
+            )
+        object.__setattr__(self, "scenario_id", scenario_id)
+        object.__setattr__(self, "grid_width", grid_width)
+        object.__setattr__(self, "grid_height", grid_height)
+        object.__setattr__(self, "obstacle_cells", tuple(obstacle_cells))
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "goal", goal)
+        object.__setattr__(self, "grid_scale", grid_scale)
+        object.__setattr__(self, "pedestrians", tuple(pedestrians))
+
+    @property
+    def pedestrian_count(self) -> int:
+        """Number of pedestrians in the scenario."""
+        return len(self.pedestrians)
+
+    @property
+    def pedestrian_start(self) -> Position:
+        """Start of the single pedestrian; only valid for N=1 scenarios."""
+        return self.pedestrians[0].start
+
+    @property
+    def pedestrian_target(self) -> Position:
+        """Target of the single pedestrian; only valid for N=1 scenarios."""
+        return self.pedestrians[0].target
+
+    @property
+    def pedestrian_speed(self) -> float:
+        """Speed of the single pedestrian; only valid for N=1 scenarios."""
+        return self.pedestrians[0].speed
 
 
 def build_scenario_grid(scenario: Scenario) -> GridMap:
@@ -99,8 +184,11 @@ def _crossing_options() -> list[tuple[Coordinate, Coordinate]]:
     return options
 
 
-def generate_scenarios(count: int, seed: int) -> list[Scenario]:
-    """Generate seeded scenarios whose pedestrian starts on the A* route."""
+def _generate_single_controlled_scenarios(
+    count: int,
+    seed: int,
+) -> list[Scenario]:
+    """The original single-human controlled generator, byte-for-byte."""
     if count < 0:
         raise ValueError("count must be non-negative")
 
@@ -135,6 +223,56 @@ def generate_scenarios(count: int, seed: int) -> list[Scenario]:
                     pedestrian_start[1]
                     + target_offset[1] * CELL_SIZE * _TARGET_OFFSET_CELLS,
                 ),
+                pedestrian_speed=pedestrian_speed,
+            )
+        )
+
+    return scenarios
+
+
+def _generate_single_diverse_scenarios(
+    count: int,
+    seed: int,
+) -> list[Scenario]:
+    """The original single-human diverse generator, byte-for-byte."""
+    if count < 0:
+        raise ValueError("count must be non-negative")
+
+    random = Random(seed)
+    options = _diverse_options()
+    remaining_options: list[
+        tuple[Coordinate, Coordinate, Coordinate, Coordinate]
+    ] = []
+    scenarios = []
+
+    for episode_index in range(count):
+        if not remaining_options:
+            remaining_options = options.copy()
+            random.shuffle(remaining_options)
+
+        start, goal, pedestrian_start, pedestrian_target = (
+            remaining_options.pop()
+        )
+        pedestrian_speed = round(
+            random.uniform(
+                _DIVERSE_MIN_PEDESTRIAN_SPEED,
+                _DIVERSE_MAX_PEDESTRIAN_SPEED,
+            ),
+            6,
+        )
+        scenarios.append(
+            Scenario(
+                scenario_id=(
+                    f"diverse-seed-{seed}-episode-{episode_index:04d}"
+                ),
+                grid_width=GRID_WIDTH,
+                grid_height=GRID_HEIGHT,
+                obstacle_cells=tuple(sorted(OBSTACLES)),
+                start=start,
+                goal=goal,
+                grid_scale=CELL_SIZE,
+                pedestrian_start=grid_to_world(pedestrian_start),
+                pedestrian_target=grid_to_world(pedestrian_target),
                 pedestrian_speed=pedestrian_speed,
             )
         )
@@ -214,37 +352,140 @@ def _diverse_options() -> list[
     return options
 
 
-def generate_diverse_scenarios(count: int, seed: int) -> list[Scenario]:
-    """Generate seeded planner-neutral scenarios around ordinary A* paths."""
+def _select_pedestrian_specs(
+    grid_map: GridMap,
+    path: list[Coordinate],
+    start: Coordinate,
+    goal: Coordinate,
+    pedestrian_count: int,
+    random: Random,
+    *,
+    min_speed: float,
+    max_speed: float,
+) -> tuple[PedestrianSpec, ...]:
+    """Deterministically select non-overlapping independent pedestrian specs.
+
+    The candidate pool consists of A*-route cells plus their four-connected
+    neighbours, excluding the robot start and goal cells.  When the pool is
+    too small to hold ``2 * pedestrian_count`` distinct cells the pool falls
+    back to every free cell (still excluding the robot endpoints).  Selection
+    uses only the seeded local RNG and ordinary A* - no social, predictive,
+    space-time, or robust planner participates in acceptance.
+    """
+    if pedestrian_count == 0:
+        return ()
+    if pedestrian_count < 0:
+        raise ValueError("pedestrian_count must be non-negative")
+
+    excluded = {start, goal}
+    path_cells = set(path)
+    near_path_cells = {
+        (cell[0] + delta_x, cell[1] + delta_y)
+        for cell in path_cells
+        for delta_x, delta_y in _NEIGHBOR_OFFSETS
+    }
+    pool = sorted(
+        cell
+        for cell in (path_cells | near_path_cells)
+        if cell not in excluded and grid_map.is_free(cell)
+    )
+    if len(pool) < 2 * pedestrian_count:
+        pool = sorted(
+            cell for cell in _free_cells(grid_map) if cell not in excluded
+        )
+    if len(pool) < 2 * pedestrian_count:
+        raise RuntimeError(
+            f"scenario map has too few free cells to place "
+            f"{pedestrian_count} pedestrians"
+        )
+
+    shuffled = pool[:]
+    random.shuffle(shuffled)
+    start_cells = shuffled[:pedestrian_count]
+    target_cells = shuffled[pedestrian_count : 2 * pedestrian_count]
+    specs = []
+    for pedestrian_start_cell, pedestrian_target_cell in zip(
+        start_cells,
+        target_cells,
+    ):
+        speed = round(random.uniform(min_speed, max_speed), 6)
+        specs.append(
+            PedestrianSpec(
+                start=grid_to_world(pedestrian_start_cell),
+                target=grid_to_world(pedestrian_target_cell),
+                speed=speed,
+            )
+        )
+    return tuple(specs)
+
+
+def _generate_multi_human_scenarios(
+    count: int,
+    seed: int,
+    pedestrian_count: int,
+    *,
+    controlled: bool,
+) -> list[Scenario]:
+    """Deterministic multi-human generation shared by both scenario modes.
+
+    Robot endpoints come from the fixed controlled map or from the
+    planner-neutral diverse templates.  Pedestrian selection is
+    planner-neutral: only ordinary A* is consulted, and only to describe
+    which cells are near the robot's route.
+    """
     if count < 0:
         raise ValueError("count must be non-negative")
+    if pedestrian_count < 0:
+        raise ValueError("pedestrian_count must be non-negative")
 
     random = Random(seed)
-    options = _diverse_options()
-    remaining_options: list[
+    if controlled:
+        min_speed = _MIN_PEDESTRIAN_SPEED
+        max_speed = _MAX_PEDESTRIAN_SPEED
+        scenario_id_prefix = "seed"
+    else:
+        min_speed = _DIVERSE_MIN_PEDESTRIAN_SPEED
+        max_speed = _DIVERSE_MAX_PEDESTRIAN_SPEED
+        scenario_id_prefix = "diverse-seed"
+
+    templates: list[
+        tuple[Coordinate, Coordinate, Coordinate, Coordinate]
+    ] | None = None
+    remaining_templates: list[
         tuple[Coordinate, Coordinate, Coordinate, Coordinate]
     ] = []
     scenarios = []
 
     for episode_index in range(count):
-        if not remaining_options:
-            remaining_options = options.copy()
-            random.shuffle(remaining_options)
+        if controlled:
+            start, goal = START, GOAL
+        else:
+            if templates is None:
+                templates = _diverse_options()
+            if not remaining_templates:
+                remaining_templates = templates.copy()
+                random.shuffle(remaining_templates)
+            start, goal, _, _ = remaining_templates.pop()
 
-        start, goal, pedestrian_start, pedestrian_target = (
-            remaining_options.pop()
-        )
-        pedestrian_speed = round(
-            random.uniform(
-                _DIVERSE_MIN_PEDESTRIAN_SPEED,
-                _DIVERSE_MAX_PEDESTRIAN_SPEED,
-            ),
-            6,
+        grid_map = build_demo_grid()
+        path = astar(grid_map, start, goal)
+        if path is None:
+            raise RuntimeError("scenario endpoints must have an A* path")
+        specs = _select_pedestrian_specs(
+            grid_map,
+            path,
+            start,
+            goal,
+            pedestrian_count,
+            random,
+            min_speed=min_speed,
+            max_speed=max_speed,
         )
         scenarios.append(
             Scenario(
                 scenario_id=(
-                    f"diverse-seed-{seed}-episode-{episode_index:04d}"
+                    f"{scenario_id_prefix}-{seed}-episode-"
+                    f"{episode_index:04d}-pedestrians-{pedestrian_count}"
                 ),
                 grid_width=GRID_WIDTH,
                 grid_height=GRID_HEIGHT,
@@ -252,13 +493,50 @@ def generate_diverse_scenarios(count: int, seed: int) -> list[Scenario]:
                 start=start,
                 goal=goal,
                 grid_scale=CELL_SIZE,
-                pedestrian_start=grid_to_world(pedestrian_start),
-                pedestrian_target=grid_to_world(pedestrian_target),
-                pedestrian_speed=pedestrian_speed,
+                pedestrians=specs,
             )
         )
 
     return scenarios
+
+
+def generate_scenarios(
+    count: int,
+    seed: int,
+    pedestrian_count: int = 1,
+) -> list[Scenario]:
+    """Generate seeded scenarios with the requested deterministic pedestrian count.
+
+    ``pedestrian_count=1`` uses the original single-human generator unchanged.
+    """
+    if pedestrian_count == 1:
+        return _generate_single_controlled_scenarios(count, seed)
+    return _generate_multi_human_scenarios(
+        count,
+        seed,
+        pedestrian_count,
+        controlled=True,
+    )
+
+
+def generate_diverse_scenarios(
+    count: int,
+    seed: int,
+    pedestrian_count: int = 1,
+) -> list[Scenario]:
+    """Generate seeded diverse scenarios with the requested pedestrian count.
+
+    ``pedestrian_count=1`` uses the original single-human diverse generator
+    unchanged.
+    """
+    if pedestrian_count == 1:
+        return _generate_single_diverse_scenarios(count, seed)
+    return _generate_multi_human_scenarios(
+        count,
+        seed,
+        pedestrian_count,
+        controlled=False,
+    )
 
 
 def is_pedestrian_route_relevant(

@@ -1,5 +1,6 @@
 """Deterministic reactive speed control for a nearby pedestrian."""
 
+from collections.abc import Iterable
 from math import hypot
 
 Position = tuple[float, float]
@@ -31,3 +32,28 @@ def compute_speed_scale(
         return 1.0
 
     return (distance - stop_distance) / (slow_distance - stop_distance)
+
+
+def compute_multi_speed_scale(
+    robot_position: Position,
+    pedestrian_positions: Iterable[Position],
+    stop_distance: float,
+    slow_distance: float,
+) -> float:
+    """Return the closest pedestrian's distance-based speed scale.
+
+    With exactly one pedestrian this is identical to
+    :func:`compute_speed_scale`; with none it returns full speed.
+    """
+    positions = tuple(pedestrian_positions)
+    if not positions:
+        return 1.0
+    return min(
+        compute_speed_scale(
+            robot_position,
+            pedestrian_position,
+            stop_distance,
+            slow_distance,
+        )
+        for pedestrian_position in positions
+    )

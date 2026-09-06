@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from heapq import heappop, heappush
 from itertools import count
-from math import floor, hypot
+from math import floor, hypot, inf
 from typing import Literal
 
 from socialnav.env.demo_map import grid_to_world
 from socialnav.env.grid_map import Coordinate, GridMap
 from socialnav.planners.pedestrian_prediction import (
+    PedestrianPredictionState,
     predict_pedestrian_position_at_time,
 )
 from socialnav.planners.social_cost import compute_social_cost
@@ -41,6 +43,21 @@ _ACTIONS: tuple[tuple[SpaceTimeAction, Coordinate], ...] = (
     ("LEFT", (-1, 0)),
     ("WAIT", (0, 0)),
 )
+
+
+def _collect_pedestrian_states(
+    pedestrian_position: Position | None,
+    pedestrian_velocity: Position,
+    pedestrian_target: Position | None,
+    additional_pedestrians: Iterable[PedestrianPredictionState],
+) -> tuple[PedestrianPredictionState, ...]:
+    states: list[PedestrianPredictionState] = []
+    if pedestrian_position is not None:
+        states.append(
+            (pedestrian_position, pedestrian_velocity, pedestrian_target)
+        )
+    states.extend(additional_pedestrians)
+    return tuple(states)
 
 
 @dataclass(frozen=True)
@@ -116,22 +133,36 @@ def compute_time_aligned_social_cost(
     grid_scale: float,
     social_distance: float,
     social_weight: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> float:
-    """Evaluate social cost at the state's exact estimated arrival time."""
+    """Evaluate summed social cost at the state's exact estimated arrival time.
+
+    Every pedestrian is predicted independently at the arrival time and the
+    individual social costs are summed without normalization.  With no
+    additional pedestrians this is the original single-human cost.
+    """
     if time_index < 0:
         raise ValueError("time_index must be non-negative")
     arrival_time = time_index * move_duration
-    pedestrian_at_arrival = predict_pedestrian_position_at_time(
+    pedestrians = _collect_pedestrian_states(
         pedestrian_position,
         pedestrian_velocity,
-        arrival_time,
-        target=pedestrian_target,
+        pedestrian_target,
+        additional_pedestrians,
     )
-    return compute_social_cost(
-        grid_to_world(coordinate, grid_scale),
-        pedestrian_at_arrival,
-        social_distance,
-        social_weight,
+    return sum(
+        compute_social_cost(
+            grid_to_world(coordinate, grid_scale),
+            predict_pedestrian_position_at_time(
+                position,
+                velocity,
+                arrival_time,
+                target=target,
+            ),
+            social_distance,
+            social_weight,
+        )
+        for position, velocity, target in pedestrians
     )
 
 
@@ -146,8 +177,14 @@ def is_space_time_action_safe(
     move_duration: float,
     grid_scale: float,
     collision_distance: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> bool:
-    """Check start, midpoint, and end separation for one timed action."""
+    """Check start, midpoint, and end separation for one timed action.
+
+    The action is safe only when the predicted separation exceeds the
+    collision distance for **every** pedestrian at all three time-aligned
+    samples.
+    """
     if start_time_index < 0:
         raise ValueError("start_time_index must be non-negative")
     if move_duration <= 0.0:
@@ -168,6 +205,7 @@ def is_space_time_action_safe(
             pedestrian_target=pedestrian_target,
             move_duration=move_duration,
             grid_scale=grid_scale,
+            additional_pedestrians=additional_pedestrians,
         )
     )
 
@@ -182,8 +220,13 @@ def inspect_space_time_first_actions(
     move_duration: float,
     grid_scale: float,
     collision_distance: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> tuple[SpaceTimeActionSafety, ...]:
-    """Describe map validity and timed separation for all five actions."""
+    """Describe map validity and timed separation for all five actions.
+
+    The reported separations are the minimum across all pedestrians at each
+    of the three time-aligned samples.
+    """
     details = []
     for action, (delta_x, delta_y) in _ACTIONS:
         destination = (start[0] + delta_x, start[1] + delta_y)
@@ -198,6 +241,7 @@ def inspect_space_time_first_actions(
             pedestrian_target=pedestrian_target,
             move_duration=move_duration,
             grid_scale=grid_scale,
+            additional_pedestrians=additional_pedestrians,
         )
         minimum_separation = min(separations)
         collision_rejection = minimum_separation <= collision_distance
@@ -238,37 +282,52 @@ def _space_time_action_separations(
     pedestrian_target: Position | None,
     move_duration: float,
     grid_scale: float,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> tuple[float, float, float]:
     start_world = grid_to_world(start, grid_scale)
     end_world = grid_to_world(end, grid_scale)
     start_time = start_time_index * move_duration
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional_pedestrians,
+    )
 
-    separations = []
-    for fraction in (0.0, 0.5, 1.0):
-        robot_position = (
-            start_world[0] + (end_world[0] - start_world[0]) * fraction,
-            start_world[1] + (end_world[1] - start_world[1]) * fraction,
-        )
-        pedestrian_at_time = predict_pedestrian_position_at_time(
-            pedestrian_position,
-            pedestrian_velocity,
-            start_time + move_duration * fraction,
-            target=pedestrian_target,
-        )
-        separations.append(
-            hypot(
-                robot_position[0] - pedestrian_at_time[0],
-                robot_position[1] - pedestrian_at_time[1],
+    separations_by_fraction: list[list[float]] = [[], [], []]
+    for position, velocity, target in pedestrians:
+        for fraction_index, fraction in enumerate((0.0, 0.5, 1.0)):
+            robot_position = (
+                start_world[0]
+                + (end_world[0] - start_world[0]) * fraction,
+                start_world[1]
+                + (end_world[1] - start_world[1]) * fraction,
             )
-        )
-    return separations[0], separations[1], separations[2]
+            pedestrian_at_time = predict_pedestrian_position_at_time(
+                position,
+                velocity,
+                start_time + move_duration * fraction,
+                target=target,
+            )
+            separations_by_fraction[fraction_index].append(
+                hypot(
+                    robot_position[0] - pedestrian_at_time[0],
+                    robot_position[1] - pedestrian_at_time[1],
+                )
+            )
+
+    return (
+        min(separations_by_fraction[0], default=inf),
+        min(separations_by_fraction[1], default=inf),
+        min(separations_by_fraction[2], default=inf),
+    )
 
 
 def space_time_social_astar(
     grid_map: GridMap,
     start: Coordinate,
     goal: Coordinate,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     social_distance: float,
@@ -279,6 +338,7 @@ def space_time_social_astar(
     max_time_seconds: float,
     *,
     diagnostic_results: list[SpaceTimePlanningResult] | None = None,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> SpaceTimePlan | None:
     """Plan in (x, y, time_index) using time-aligned pedestrian occupancy."""
     _validate_endpoint(grid_map, start, "start")
@@ -296,6 +356,7 @@ def space_time_social_astar(
         grid_scale,
         robot_speed,
         max_time_seconds,
+        additional_pedestrians=additional_pedestrians,
     )
     if diagnostic_results is not None:
         diagnostic_results.append(result)
@@ -306,7 +367,7 @@ def diagnose_space_time_social_astar(
     grid_map: GridMap,
     start: Coordinate,
     goal: Coordinate,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
     pedestrian_target: Position | None,
     social_distance: float,
@@ -315,6 +376,8 @@ def diagnose_space_time_social_astar(
     grid_scale: float,
     robot_speed: float,
     max_time_seconds: float,
+    *,
+    additional_pedestrians: Iterable[PedestrianPredictionState] = (),
 ) -> SpaceTimePlanningResult:
     """Run the unchanged search and return deterministic diagnostic evidence."""
     if social_distance <= 0.0:
@@ -330,6 +393,7 @@ def diagnose_space_time_social_astar(
     if max_time_seconds < 0.0:
         raise ValueError("max_time_seconds must be non-negative")
 
+    additional = tuple(additional_pedestrians)
     move_duration = grid_scale / robot_speed
     max_time_index = floor(max_time_seconds / move_duration)
     empty_statistics = SpaceTimeSearchStatistics(
@@ -366,6 +430,7 @@ def diagnose_space_time_social_astar(
         move_duration=move_duration,
         grid_scale=grid_scale,
         collision_distance=collision_distance,
+        additional_pedestrians=additional,
     )
     start_state: State = (start[0], start[1], 0)
     if start == goal:
@@ -461,6 +526,7 @@ def diagnose_space_time_social_astar(
                 move_duration=move_duration,
                 grid_scale=grid_scale,
                 collision_distance=collision_distance,
+                additional_pedestrians=additional,
             ):
                 continue
 
@@ -475,6 +541,7 @@ def diagnose_space_time_social_astar(
                 grid_scale=grid_scale,
                 social_distance=social_distance,
                 social_weight=social_weight,
+                additional_pedestrians=additional,
             )
             new_cost = current_cost + 1.0 + social_penalty
             if new_cost >= cost_so_far.get(next_state, float("inf")):
@@ -496,10 +563,22 @@ def diagnose_space_time_social_astar(
     planning_horizon_reached = (
         maximum_time_index_reached >= max_time_index
     )
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional,
+    )
     start_world = grid_to_world(start, grid_scale)
-    start_separation = hypot(
-        start_world[0] - pedestrian_position[0],
-        start_world[1] - pedestrian_position[1],
+    start_separation = min(
+        (
+            hypot(
+                start_world[0] - position[0],
+                start_world[1] - position[1],
+            )
+            for position, _, _ in pedestrians
+        ),
+        default=inf,
     )
     has_safe_first_action = any(
         detail.rejection_reason is None for detail in first_action_safety

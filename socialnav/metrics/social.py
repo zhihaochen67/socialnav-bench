@@ -86,3 +86,65 @@ def has_human_collision(
         for timestep, robot_position in enumerate(robot_trajectory)
         for human_trajectory in human_trajectories
     )
+
+def compute_per_human_minimum_distances(
+    robot_trajectory: Sequence[Position],
+    human_trajectories: Sequence[Sequence[Position]],
+) -> tuple[float | None, ...]:
+    """Return the closest synchronized distance for each pedestrian."""
+    _validate_aligned_trajectories(robot_trajectory, human_trajectories)
+    if not robot_trajectory:
+        return tuple(None for _ in human_trajectories)
+
+    return tuple(
+        min(
+            _distance(robot_position, human_trajectory[timestep])
+            for timestep, robot_position in enumerate(robot_trajectory)
+        )
+        for human_trajectory in human_trajectories
+    )
+
+
+def compute_per_human_social_violation_rates(
+    robot_trajectory: Sequence[Position],
+    human_trajectories: Sequence[Sequence[Position]],
+    social_distance: float,
+) -> tuple[float, ...]:
+    """Return each pedestrian's fraction of inside-social-radius timesteps."""
+    if social_distance <= 0.0:
+        raise ValueError("social_distance must be positive")
+
+    _validate_aligned_trajectories(robot_trajectory, human_trajectories)
+    if not robot_trajectory:
+        return tuple(0.0 for _ in human_trajectories)
+
+    return tuple(
+        sum(
+            _distance(robot_position, human_trajectory[timestep])
+            < social_distance
+            for timestep, robot_position in enumerate(robot_trajectory)
+        )
+        / len(robot_trajectory)
+        for human_trajectory in human_trajectories
+    )
+
+
+def colliding_human_indices(
+    robot_trajectory: Sequence[Position],
+    human_trajectories: Sequence[Sequence[Position]],
+    collision_distance: float,
+) -> tuple[int, ...]:
+    """Return the index of every pedestrian involved in any collision."""
+    if collision_distance < 0.0:
+        raise ValueError("collision_distance must be non-negative")
+
+    _validate_aligned_trajectories(robot_trajectory, human_trajectories)
+    return tuple(
+        index
+        for index, human_trajectory in enumerate(human_trajectories)
+        if any(
+            _distance(robot_position, human_trajectory[timestep])
+            <= collision_distance
+            for timestep, robot_position in enumerate(robot_trajectory)
+        )
+    )

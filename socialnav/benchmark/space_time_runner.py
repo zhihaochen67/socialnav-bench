@@ -25,9 +25,14 @@ from socialnav.env.world import (
     STOP_DISTANCE,
 )
 from socialnav.evaluation import EpisodeResult, evaluate_episode
-from socialnav.metrics import Position, compute_path_length
+from socialnav.metrics import (
+    Position,
+    colliding_human_indices,
+    compute_path_length,
+    compute_per_human_minimum_distances,
+)
 from socialnav.planners.astar import astar
-from socialnav.planners.dynamic_avoidance import compute_speed_scale
+from socialnav.planners.dynamic_avoidance import compute_multi_speed_scale
 from socialnav.planners.space_time_planner import (
     SpaceTimePlan,
     SpaceTimePlanningResult,
@@ -100,29 +105,75 @@ def _record_position(body_id: int, client_id: int) -> Position:
     return position[0], position[1]
 
 
+def _closest_pedestrian(
+    pedestrians: list[Pedestrian],
+    robot_position: Position,
+) -> Pedestrian | None:
+    """Return the pedestrian nearest the robot, with stable index-order ties."""
+    if not pedestrians:
+        return None
+    return min(
+        pedestrians,
+        key=lambda pedestrian: (
+            (pedestrian.position[0] - robot_position[0]) ** 2
+            + (pedestrian.position[1] - robot_position[1]) ** 2
+        ),
+    )
+
+
 def _plan(
     scenario: Scenario,
     start: tuple[int, int],
-    pedestrian: Pedestrian,
+    pedestrians: list[Pedestrian],
     max_time_seconds: float,
 ) -> tuple[SpaceTimePlan | None, SpaceTimePlanningResult]:
     grid_map = build_scenario_grid(scenario)
     diagnostic_results: list[SpaceTimePlanningResult] = []
-    plan = space_time_social_astar(
-        grid_map,
-        start,
-        scenario.goal,
-        pedestrian.position,
-        pedestrian.velocity,
-        pedestrian.target_position,
-        SOCIAL_DISTANCE,
-        SOCIAL_WEIGHT,
-        HUMAN_COLLISION_DISTANCE,
-        scenario.grid_scale,
-        ROBOT_SPEED,
-        max_time_seconds,
-        diagnostic_results=diagnostic_results,
+    closest = _closest_pedestrian(
+        pedestrians,
+        grid_to_world(start, scenario.grid_scale),
     )
+    if closest is None:
+        plan = space_time_social_astar(
+            grid_map,
+            start,
+            scenario.goal,
+            None,
+            (0.0, 0.0),
+            None,
+            SOCIAL_DISTANCE,
+            SOCIAL_WEIGHT,
+            HUMAN_COLLISION_DISTANCE,
+            scenario.grid_scale,
+            ROBOT_SPEED,
+            max_time_seconds,
+            diagnostic_results=diagnostic_results,
+        )
+    else:
+        plan = space_time_social_astar(
+            grid_map,
+            start,
+            scenario.goal,
+            closest.position,
+            closest.velocity,
+            closest.target_position,
+            SOCIAL_DISTANCE,
+            SOCIAL_WEIGHT,
+            HUMAN_COLLISION_DISTANCE,
+            scenario.grid_scale,
+            ROBOT_SPEED,
+            max_time_seconds,
+            diagnostic_results=diagnostic_results,
+            additional_pedestrians=tuple(
+                (
+                    pedestrian.position,
+                    pedestrian.velocity,
+                    pedestrian.target_position,
+                )
+                for pedestrian in pedestrians
+                if pedestrian is not closest
+            ),
+        )
     planning_result = (
         diagnostic_results[0]
         if diagnostic_results
@@ -156,7 +207,58 @@ def _fallback_planning_result(
             ),
         ),
     )
-
+def _planning_call(
+    *,
+    scenario: Scenario,
+    call_index: int,
+    is_initial_plan: bool,
+    simulation_step: int,
+    remaining_episode_time: float,
+    stopped_streak: int,
+    total_reactive_stopped_steps: int,
+    previous_successful_plan_step: int | None,
+    actual_robot_position: Position,
+    mapped_start: tuple[int, int],
+    pedestrians: list[Pedestrian],
+    planning_result: SpaceTimePlanningResult,
+) -> SpaceTimePlanningCall:
+    closest = _closest_pedestrian(pedestrians, actual_robot_position)
+    return build_space_time_planning_call(
+        scenario_id=scenario.scenario_id,
+        call_index=call_index,
+        is_initial_plan=is_initial_plan,
+        simulation_step=simulation_step,
+        simulated_episode_time=simulation_step * SIMULATION_STEP,
+        remaining_episode_time=remaining_episode_time,
+        stopped_streak=stopped_streak,
+        total_reactive_stopped_steps=total_reactive_stopped_steps,
+        previous_successful_plan_step=previous_successful_plan_step,
+        actual_robot_world_position=actual_robot_position,
+        mapped_robot_grid_cell=mapped_start,
+        pedestrian_position=(
+            closest.position if closest is not None else None
+        ),
+        pedestrian_velocity=(
+            closest.velocity if closest is not None else (0.0, 0.0)
+        ),
+        pedestrian_target=(
+            closest.target_position if closest is not None else None
+        ),
+        grid_scale=scenario.grid_scale,
+        move_duration=scenario.grid_scale / ROBOT_SPEED,
+        collision_distance=HUMAN_COLLISION_DISTANCE,
+        planning_result=planning_result,
+        additional_pedestrians=tuple(
+            (
+                pedestrian.position,
+                pedestrian.velocity,
+                pedestrian.target_position,
+            )
+            for pedestrian in pedestrians
+            if pedestrian is not closest
+        ),
+        pedestrian_count=len(pedestrians),
+    )
 
 
 def run_space_time_episode_with_trace(
@@ -177,38 +279,32 @@ def run_space_time_episode_with_trace(
     if astar_path is None:
         raise ValueError("scenario goal must be reachable by A*")
 
-    pedestrian = Pedestrian(
-        scenario.pedestrian_start,
-        scenario.pedestrian_target,
-        scenario.pedestrian_speed,
-    )
+    pedestrians = [
+        Pedestrian(spec.start, spec.target, spec.speed)
+        for spec in scenario.pedestrians
+    ]
     maximum_planning_seconds = max_steps * SIMULATION_STEP
     start_position = grid_to_world(scenario.start, scenario.grid_scale)
     current_plan, initial_planning_result = _plan(
         scenario,
         scenario.start,
-        pedestrian,
+        pedestrians,
         maximum_planning_seconds,
     )
+    final_planning_result = initial_planning_result
     planning_calls: list[SpaceTimePlanningCall] = [
-        build_space_time_planning_call(
-            scenario_id=scenario.scenario_id,
+        _planning_call(
+            scenario=scenario,
             call_index=0,
             is_initial_plan=True,
             simulation_step=0,
-            simulated_episode_time=0.0,
             remaining_episode_time=maximum_planning_seconds,
             stopped_streak=0,
             total_reactive_stopped_steps=0,
             previous_successful_plan_step=None,
-            actual_robot_world_position=start_position,
-            mapped_robot_grid_cell=scenario.start,
-            pedestrian_position=pedestrian.position,
-            pedestrian_velocity=pedestrian.velocity,
-            pedestrian_target=pedestrian.target_position,
-            grid_scale=scenario.grid_scale,
-            move_duration=scenario.grid_scale / ROBOT_SPEED,
-            collision_distance=HUMAN_COLLISION_DISTANCE,
+            actual_robot_position=start_position,
+            mapped_start=scenario.start,
+            pedestrians=pedestrians,
             planning_result=initial_planning_result,
         )
     ]
@@ -252,16 +348,20 @@ def run_space_time_episode_with_trace(
             ROBOT_HEIGHT,
             client_id,
         )
-        pedestrian_id = _create_cylinder(
-            pedestrian.position,
-            PEDESTRIAN_RADIUS,
-            PEDESTRIAN_HEIGHT,
-            client_id,
-        )
+        pedestrian_ids = [
+            _create_cylinder(
+                pedestrian.position,
+                PEDESTRIAN_RADIUS,
+                PEDESTRIAN_HEIGHT,
+                client_id,
+            )
+            for pedestrian in pedestrians
+        ]
 
         robot_trajectory = [_record_position(robot_id, client_id)]
-        pedestrian_trajectory = [
-            _record_position(pedestrian_id, client_id)
+        pedestrian_trajectories = [
+            [_record_position(pedestrian_id, client_id)]
+            for pedestrian_id in pedestrian_ids
         ]
         speed_scales: list[float] = []
         replan_policy = (
@@ -316,9 +416,12 @@ def run_space_time_episode_with_trace(
                         (next_state[0], next_state[1]),
                         scenario.grid_scale,
                     )
-                    speed_scale = compute_speed_scale(
+                    speed_scale = compute_multi_speed_scale(
                         current_robot_position,
-                        pedestrian.position,
+                        [
+                            pedestrian.position
+                            for pedestrian in pedestrians
+                        ],
                         STOP_DISTANCE,
                         SLOW_DISTANCE,
                     )
@@ -340,17 +443,17 @@ def run_space_time_episode_with_trace(
                         replanned, planning_result = _plan(
                             scenario,
                             replan_start,
-                            pedestrian,
+                            pedestrians,
                             maximum_planning_seconds,
                         )
+                        final_planning_result = planning_result
                         call_step = steps + 1
                         planning_calls.append(
-                            build_space_time_planning_call(
-                                scenario_id=scenario.scenario_id,
+                            _planning_call(
+                                scenario=scenario,
                                 call_index=len(planning_calls),
                                 is_initial_plan=False,
                                 simulation_step=call_step,
-                                simulated_episode_time=steps * SIMULATION_STEP,
                                 remaining_episode_time=(
                                     (max_steps - steps) * SIMULATION_STEP
                                 ),
@@ -361,16 +464,11 @@ def run_space_time_episode_with_trace(
                                 previous_successful_plan_step=(
                                     previous_successful_plan_step
                                 ),
-                                actual_robot_world_position=(
+                                actual_robot_position=(
                                     current_robot_position
                                 ),
-                                mapped_robot_grid_cell=replan_start,
-                                pedestrian_position=pedestrian.position,
-                                pedestrian_velocity=pedestrian.velocity,
-                                pedestrian_target=pedestrian.target_position,
-                                grid_scale=scenario.grid_scale,
-                                move_duration=scenario.grid_scale / ROBOT_SPEED,
-                                collision_distance=HUMAN_COLLISION_DISTANCE,
+                                mapped_start=replan_start,
+                                pedestrians=pedestrians,
                                 planning_result=planning_result,
                             )
                         )
@@ -424,26 +522,31 @@ def run_space_time_episode_with_trace(
                 (0.0, 0.0, 0.0, 1.0),
                 physicsClientId=client_id,
             )
-            pedestrian_position = pedestrian.advance(SIMULATION_STEP)
-            p.resetBasePositionAndOrientation(
-                pedestrian_id,
-                (
-                    *pedestrian_position,
-                    PEDESTRIAN_HEIGHT / 2 + 0.01,
-                ),
-                (0.0, 0.0, 0.0, 1.0),
-                physicsClientId=client_id,
-            )
+            for pedestrian, pedestrian_id in zip(
+                pedestrians,
+                pedestrian_ids,
+            ):
+                pedestrian_position = pedestrian.advance(SIMULATION_STEP)
+                p.resetBasePositionAndOrientation(
+                    pedestrian_id,
+                    (
+                        *pedestrian_position,
+                        PEDESTRIAN_HEIGHT / 2 + 0.01,
+                    ),
+                    (0.0, 0.0, 0.0, 1.0),
+                    physicsClientId=client_id,
+                )
             p.stepSimulation(physicsClientId=client_id)
             steps += 1
             robot_trajectory.append(_record_position(robot_id, client_id))
-            pedestrian_trajectory.append(
-                _record_position(pedestrian_id, client_id)
-            )
-
+            for trajectory, pedestrian_id in zip(
+                pedestrian_trajectories,
+                pedestrian_ids,
+            ):
+                trajectory.append(_record_position(pedestrian_id, client_id))
         result = evaluate_episode(
             robot_trajectory,
-            [pedestrian_trajectory],
+            pedestrian_trajectories,
             goal_position=grid_to_world(
                 scenario.goal,
                 scenario.grid_scale,
@@ -459,13 +562,24 @@ def run_space_time_episode_with_trace(
             robot_radius=ROBOT_RADIUS,
         )
         path_completed = plan_is_complete()
-        planned_path = (
-            (start_position,)
-            if selected_plan is None
-            else tuple(
+        if selected_plan is None:
+            planned_path = (start_position,)
+        else:
+            planned_path = tuple(
                 grid_to_world(coordinate, scenario.grid_scale)
                 for coordinate in selected_plan.spatial_path
             )
+        final_robot_position = robot_trajectory[-1]
+        closest_final = _closest_pedestrian(
+            pedestrians,
+            final_robot_position,
+        )
+        minimum_predicted_separation = min(
+            (
+                detail.minimum_predicted_separation
+                for detail in final_planning_result.first_action_safety
+            ),
+            default=None,
         )
         trace = EpisodeTrace(
             planned_path=planned_path,
@@ -475,8 +589,12 @@ def run_space_time_episode_with_trace(
                 max_steps=max_steps,
                 path_completed=path_completed,
             ),
-            final_robot_position=robot_trajectory[-1],
-            final_pedestrian_position=pedestrian_trajectory[-1],
+            final_robot_position=final_robot_position,
+            final_pedestrian_position=(
+                closest_final.position
+                if closest_final is not None
+                else (0.0, 0.0)
+            ),
             max_steps=max_steps,
             replan_count=len(replan_steps),
             replan_steps=tuple(replan_steps),
@@ -490,6 +608,41 @@ def run_space_time_episode_with_trace(
             total_intentional_wait_steps=total_intentional_wait_steps,
             space_time_planning_calls=tuple(planning_calls),
             reactive_stopped_steps=reactive_stopped_steps,
+            pedestrian_count=len(pedestrians),
+            initial_pedestrian_positions=tuple(
+                pedestrian.start_position for pedestrian in pedestrians
+            ),
+            initial_pedestrian_velocities=tuple(
+                pedestrian.velocity for pedestrian in pedestrians
+            ),
+            pedestrian_targets=tuple(
+                pedestrian.target_position for pedestrian in pedestrians
+            ),
+            final_pedestrian_positions=tuple(
+                pedestrian.position for pedestrian in pedestrians
+            ),
+            per_human_minimum_distances=(
+                compute_per_human_minimum_distances(
+                    robot_trajectory,
+                    pedestrian_trajectories,
+                )
+            ),
+            collision_human_indices=colliding_human_indices(
+                robot_trajectory,
+                pedestrian_trajectories,
+                HUMAN_COLLISION_DISTANCE,
+            ),
+            blocking_human_indices=tuple(
+                index
+                for index, pedestrian in enumerate(pedestrians)
+                if (
+                    (pedestrian.position[0] - final_robot_position[0]) ** 2
+                    + (pedestrian.position[1] - final_robot_position[1]) ** 2
+                )
+                ** 0.5
+                <= STOP_DISTANCE
+            ),
+            minimum_predicted_separation=minimum_predicted_separation,
         )
         return result, trace
     finally:

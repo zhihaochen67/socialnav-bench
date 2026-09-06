@@ -26,7 +26,12 @@ from socialnav.env.world import (
     STOP_DISTANCE,
 )
 from socialnav.evaluation import EpisodeResult, evaluate_episode
-from socialnav.metrics import Position, compute_path_length
+from socialnav.metrics import (
+    Position,
+    colliding_human_indices,
+    compute_path_length,
+    compute_per_human_minimum_distances,
+)
 from socialnav.planners.astar import astar
 from socialnav.planners.directional_avoidance import (
     ESCAPE_SPEED_SCALE,
@@ -65,27 +70,53 @@ from .space_time_runner import (
 ROBUST_SPACE_TIME_METHOD = "social_spacetime_robust"
 
 
+def _closest_pedestrian(
+    pedestrians: list[Pedestrian],
+    robot_position: Position,
+) -> Pedestrian | None:
+    """Return the pedestrian nearest the robot, with stable index-order ties."""
+    if not pedestrians:
+        return None
+    return min(
+        pedestrians,
+        key=lambda pedestrian: hypot(
+            robot_position[0] - pedestrian.position[0],
+            robot_position[1] - pedestrian.position[1],
+        ),
+    )
+
+
 def _plan(
     scenario: Scenario,
     actual_start_position: Position,
     mapped_start: tuple[int, int],
-    pedestrian: Pedestrian,
+    pedestrians: list[Pedestrian],
     max_time_seconds: float,
 ) -> RobustSpaceTimePlanningResult:
+    closest = _closest_pedestrian(pedestrians, actual_start_position)
     return robust_space_time_social_astar(
         build_scenario_grid(scenario),
         actual_start_position,
         mapped_start,
         scenario.goal,
-        pedestrian.position,
-        pedestrian.velocity,
-        pedestrian.target_position,
+        closest.position if closest is not None else None,
+        closest.velocity if closest is not None else (0.0, 0.0),
+        closest.target_position if closest is not None else None,
         SOCIAL_DISTANCE,
         SOCIAL_WEIGHT,
         HUMAN_COLLISION_DISTANCE,
         scenario.grid_scale,
         ROBOT_SPEED,
         max_time_seconds,
+        additional_pedestrians=tuple(
+            (
+                pedestrian.position,
+                pedestrian.velocity,
+                pedestrian.target_position,
+            )
+            for pedestrian in pedestrians
+            if pedestrian is not closest
+        ),
     )
 
 
@@ -124,13 +155,14 @@ def _planning_call(
     previous_successful_plan_step: int | None,
     actual_robot_position: Position,
     mapped_start: tuple[int, int],
-    pedestrian: Pedestrian,
+    pedestrians: list[Pedestrian],
 ) -> SpaceTimePlanningCall:
     diagnostic_start = (
         planning_result.bridge.target_cell
         if planning_result.bridge is not None
         else mapped_start
     )
+    closest = _closest_pedestrian(pedestrians, actual_robot_position)
     return build_space_time_planning_call(
         scenario_id=scenario.scenario_id,
         call_index=call_index,
@@ -143,13 +175,29 @@ def _planning_call(
         previous_successful_plan_step=previous_successful_plan_step,
         actual_robot_world_position=actual_robot_position,
         mapped_robot_grid_cell=diagnostic_start,
-        pedestrian_position=pedestrian.position,
-        pedestrian_velocity=pedestrian.velocity,
-        pedestrian_target=pedestrian.target_position,
+        pedestrian_position=(
+            closest.position if closest is not None else None
+        ),
+        pedestrian_velocity=(
+            closest.velocity if closest is not None else (0.0, 0.0)
+        ),
+        pedestrian_target=(
+            closest.target_position if closest is not None else None
+        ),
         grid_scale=scenario.grid_scale,
         move_duration=scenario.grid_scale / ROBOT_SPEED,
         collision_distance=HUMAN_COLLISION_DISTANCE,
         planning_result=_fallback_grid_result(planning_result),
+        additional_pedestrians=tuple(
+            (
+                pedestrian.position,
+                pedestrian.velocity,
+                pedestrian.target_position,
+            )
+            for pedestrian in pedestrians
+            if pedestrian is not closest
+        ),
+        pedestrian_count=len(pedestrians),
     )
 
 
@@ -182,8 +230,6 @@ def _classify_robust_episode_failure(
     if progress_stall_events > 0:
         return "progress_stall"
     return "other"
-
-
 def run_robust_space_time_episode_with_trace(
     scenario: Scenario,
     method: str,
@@ -207,11 +253,10 @@ def run_robust_space_time_episode_with_trace(
         raise ValueError("scenario goal must be reachable by A*")
 
     start_position = grid_to_world(scenario.start, scenario.grid_scale)
-    pedestrian = Pedestrian(
-        scenario.pedestrian_start,
-        scenario.pedestrian_target,
-        scenario.pedestrian_speed,
-    )
+    pedestrians = [
+        Pedestrian(spec.start, spec.target, spec.speed)
+        for spec in scenario.pedestrians
+    ]
     maximum_planning_seconds = max_steps * SIMULATION_STEP
 
     continuous_bridge_attempts = 0
@@ -237,10 +282,14 @@ def run_robust_space_time_episode_with_trace(
         nonlocal collision_egress_failures
 
         continuous_bridge_attempts += 1
-        starts_unsafe = hypot(
-            actual_robot_position[0] - pedestrian.position[0],
-            actual_robot_position[1] - pedestrian.position[1],
-        ) <= HUMAN_COLLISION_DISTANCE
+        starts_unsafe = any(
+            hypot(
+                actual_robot_position[0] - pedestrian.position[0],
+                actual_robot_position[1] - pedestrian.position[1],
+            )
+            <= HUMAN_COLLISION_DISTANCE
+            for pedestrian in pedestrians
+        )
         if starts_unsafe:
             collision_egress_attempts += 1
         if planning_result.bridge is None:
@@ -265,10 +314,11 @@ def run_robust_space_time_episode_with_trace(
         scenario,
         start_position,
         scenario.start,
-        pedestrian,
+        pedestrians,
         maximum_planning_seconds,
     )
     account_planning_result(initial_result, start_position)
+    last_planning_result = initial_result
     current_plan = initial_result.plan
     selected_plan = current_plan
     planning_calls = [
@@ -284,7 +334,7 @@ def run_robust_space_time_episode_with_trace(
             previous_successful_plan_step=None,
             actual_robot_position=start_position,
             mapped_start=scenario.start,
-            pedestrian=pedestrian,
+            pedestrians=pedestrians,
         )
     ]
     previous_successful_plan_step = (
@@ -330,16 +380,20 @@ def run_robust_space_time_episode_with_trace(
             ROBOT_HEIGHT,
             client_id,
         )
-        pedestrian_id = _create_cylinder(
-            pedestrian.position,
-            PEDESTRIAN_RADIUS,
-            PEDESTRIAN_HEIGHT,
-            client_id,
-        )
+        pedestrian_ids = [
+            _create_cylinder(
+                pedestrian.position,
+                PEDESTRIAN_RADIUS,
+                PEDESTRIAN_HEIGHT,
+                client_id,
+            )
+            for pedestrian in pedestrians
+        ]
 
         robot_trajectory = [_record_position(robot_id, client_id)]
-        pedestrian_trajectory = [
-            _record_position(pedestrian_id, client_id)
+        pedestrian_trajectories = [
+            [_record_position(pedestrian_id, client_id)]
+            for pedestrian_id in pedestrian_ids
         ]
         speed_scales: list[float] = []
         stall_detector = ProgressStallDetector(
@@ -378,6 +432,10 @@ def run_robust_space_time_episode_with_trace(
 
         while steps < max_steps and not plan_is_complete():
             current_robot_position = robot_trajectory[-1]
+            closest = _closest_pedestrian(
+                pedestrians,
+                current_robot_position,
+            )
 
             if pending_stall_event is not None:
                 mapped_start = world_to_nearest_free_cell(
@@ -385,12 +443,36 @@ def run_robust_space_time_episode_with_trace(
                     current_robot_position,
                     scenario.grid_scale,
                 )
+                closest_for_suppress = _closest_pedestrian(
+                    pedestrians,
+                    current_robot_position,
+                )
                 if suppressor.should_suppress(
                     mapped_start=mapped_start,
                     robot_position=current_robot_position,
-                    pedestrian_position=pedestrian.position,
-                    pedestrian_velocity=pedestrian.velocity,
-                    pedestrian_target=pedestrian.target_position,
+                    pedestrian_position=(
+                        closest_for_suppress.position
+                        if closest_for_suppress is not None
+                        else (0.0, 0.0)
+                    ),
+                    pedestrian_velocity=(
+                        closest_for_suppress.velocity
+                        if closest_for_suppress is not None
+                        else (0.0, 0.0)
+                    ),
+                    pedestrian_target=(
+                        closest_for_suppress.target_position
+                        if closest_for_suppress is not None
+                        else (0.0, 0.0)
+                    ),
+                    pedestrian_states=tuple(
+                        (
+                            pedestrian.position,
+                            pedestrian.velocity,
+                            pedestrian.target_position,
+                        )
+                        for pedestrian in pedestrians
+                    ),
                 ):
                     suppressed_duplicate_replans += 1
                 else:
@@ -399,9 +481,10 @@ def run_robust_space_time_episode_with_trace(
                         scenario,
                         current_robot_position,
                         mapped_start,
-                        pedestrian,
+                        pedestrians,
                         (max_steps - steps) * SIMULATION_STEP,
                     )
+                    last_planning_result = replanned_result
                     account_planning_result(
                         replanned_result,
                         current_robot_position,
@@ -426,20 +509,46 @@ def run_robust_space_time_episode_with_trace(
                             ),
                             actual_robot_position=current_robot_position,
                             mapped_start=mapped_start,
-                            pedestrian=pedestrian,
+                            pedestrians=pedestrians,
                         )
                     )
                     if replanned_result.plan is None:
                         robust_replan_failures += 1
                         spacetime_planning_failures += 1
                         assert replanned_result.failure_reason is not None
+                        closest_failed = _closest_pedestrian(
+                            pedestrians,
+                            current_robot_position,
+                        )
                         suppressor.record_failure(
                             mapped_start=mapped_start,
                             robot_position=current_robot_position,
-                            pedestrian_position=pedestrian.position,
-                            pedestrian_velocity=pedestrian.velocity,
-                            pedestrian_target=pedestrian.target_position,
-                            failure_reason=replanned_result.failure_reason,
+                            pedestrian_position=(
+                                closest_failed.position
+                                if closest_failed is not None
+                                else (0.0, 0.0)
+                            ),
+                            pedestrian_velocity=(
+                                closest_failed.velocity
+                                if closest_failed is not None
+                                else (0.0, 0.0)
+                            ),
+                            pedestrian_target=(
+                                closest_failed.target_position
+                                if closest_failed is not None
+                                else (0.0, 0.0)
+                            ),
+                            failure_reason=(
+                                replanned_result.failure_reason
+                            ),
+                            pedestrian_states=tuple(
+                                (
+                                    pedestrian.position,
+                                    pedestrian.velocity,
+                                    pedestrian.target_position,
+                                )
+                                for pedestrian in pedestrians
+                            ),
                         )
                     else:
                         robust_replan_successes += 1
@@ -461,7 +570,6 @@ def run_robust_space_time_episode_with_trace(
                         action_start_position = None
                 stall_detector.reset(current_robot_position)
                 pending_stall_event = None
-
             robot_position = current_robot_position
             intentional_wait = False
             if current_plan is None:
@@ -473,14 +581,22 @@ def run_robust_space_time_episode_with_trace(
                     current_plan.bridge.target_position[1]
                     - current_robot_position[1],
                 )
-                speed_scale = compute_directional_speed_scale(
-                    current_robot_position,
-                    pedestrian.position,
-                    intended_motion,
-                    STOP_DISTANCE,
-                    SLOW_DISTANCE,
-                    ESCAPE_SPEED_SCALE,
-                )
+                if closest is None:
+                    speed_scale = 1.0
+                else:
+                    speed_scale = compute_directional_speed_scale(
+                        current_robot_position,
+                        closest.position,
+                        intended_motion,
+                        STOP_DISTANCE,
+                        SLOW_DISTANCE,
+                        ESCAPE_SPEED_SCALE,
+                        additional_pedestrian_positions=[
+                            pedestrian.position
+                            for pedestrian in pedestrians
+                            if pedestrian is not closest
+                        ],
+                    )
                 if speed_scale == 0.0:
                     reactive_stopped_steps += 1
                 bridge_progress = min(
@@ -535,14 +651,22 @@ def run_robust_space_time_episode_with_trace(
                         target_position[0] - current_robot_position[0],
                         target_position[1] - current_robot_position[1],
                     )
-                    speed_scale = compute_directional_speed_scale(
-                        current_robot_position,
-                        pedestrian.position,
-                        intended_motion,
-                        STOP_DISTANCE,
-                        SLOW_DISTANCE,
-                        ESCAPE_SPEED_SCALE,
-                    )
+                    if closest is None:
+                        speed_scale = 1.0
+                    else:
+                        speed_scale = compute_directional_speed_scale(
+                            current_robot_position,
+                            closest.position,
+                            intended_motion,
+                            STOP_DISTANCE,
+                            SLOW_DISTANCE,
+                            ESCAPE_SPEED_SCALE,
+                            additional_pedestrian_positions=[
+                                pedestrian.position
+                                for pedestrian in pedestrians
+                                if pedestrian is not closest
+                            ],
+                        )
                     if speed_scale == 0.0:
                         reactive_stopped_steps += 1
                     action_progress = min(
@@ -575,23 +699,29 @@ def run_robust_space_time_episode_with_trace(
                 (0.0, 0.0, 0.0, 1.0),
                 physicsClientId=client_id,
             )
-            pedestrian_position = pedestrian.advance(SIMULATION_STEP)
-            p.resetBasePositionAndOrientation(
-                pedestrian_id,
-                (
-                    *pedestrian_position,
-                    PEDESTRIAN_HEIGHT / 2 + 0.01,
-                ),
-                (0.0, 0.0, 0.0, 1.0),
-                physicsClientId=client_id,
-            )
+            for pedestrian, pedestrian_id in zip(
+                pedestrians,
+                pedestrian_ids,
+            ):
+                pedestrian_position = pedestrian.advance(SIMULATION_STEP)
+                p.resetBasePositionAndOrientation(
+                    pedestrian_id,
+                    (
+                        *pedestrian_position,
+                        PEDESTRIAN_HEIGHT / 2 + 0.01,
+                    ),
+                    (0.0, 0.0, 0.0, 1.0),
+                    physicsClientId=client_id,
+                )
             p.stepSimulation(physicsClientId=client_id)
             steps += 1
             recorded_robot_position = _record_position(robot_id, client_id)
             robot_trajectory.append(recorded_robot_position)
-            pedestrian_trajectory.append(
-                _record_position(pedestrian_id, client_id)
-            )
+            for trajectory, pedestrian_id in zip(
+                pedestrian_trajectories,
+                pedestrian_ids,
+            ):
+                trajectory.append(_record_position(pedestrian_id, client_id))
             stall_event = stall_detector.observe(
                 recorded_robot_position,
                 speed_scale,
@@ -606,7 +736,7 @@ def run_robust_space_time_episode_with_trace(
 
         result = evaluate_episode(
             robot_trajectory,
-            [pedestrian_trajectory],
+            pedestrian_trajectories,
             goal_position=grid_to_world(
                 scenario.goal,
                 scenario.grid_scale,
@@ -639,6 +769,18 @@ def run_robust_space_time_episode_with_trace(
             progress_stall_events,
             robust_replan_successes,
         )
+        final_robot_position = robot_trajectory[-1]
+        closest_final = _closest_pedestrian(
+            pedestrians,
+            final_robot_position,
+        )
+        minimum_predicted_separation = min(
+            (
+                candidate.minimum_predicted_separation
+                for candidate in last_planning_result.bridge_candidates
+            ),
+            default=None,
+        )
         trace = EpisodeTrace(
             planned_path=planned_path,
             speed_scales=tuple(speed_scales),
@@ -647,8 +789,12 @@ def run_robust_space_time_episode_with_trace(
                 max_steps=max_steps,
                 path_completed=path_completed,
             ),
-            final_robot_position=robot_trajectory[-1],
-            final_pedestrian_position=pedestrian_trajectory[-1],
+            final_robot_position=final_robot_position,
+            final_pedestrian_position=(
+                closest_final.position
+                if closest_final is not None
+                else (0.0, 0.0)
+            ),
             max_steps=max_steps,
             replan_count=len(replan_steps),
             replan_steps=tuple(replan_steps),
@@ -683,6 +829,40 @@ def run_robust_space_time_episode_with_trace(
                 robust_planning_failure_reasons
             ),
             robust_episode_failure_reason=robust_failure_reason,
+            pedestrian_count=len(pedestrians),
+            initial_pedestrian_positions=tuple(
+                pedestrian.start_position for pedestrian in pedestrians
+            ),
+            initial_pedestrian_velocities=tuple(
+                pedestrian.velocity for pedestrian in pedestrians
+            ),
+            pedestrian_targets=tuple(
+                pedestrian.target_position for pedestrian in pedestrians
+            ),
+            final_pedestrian_positions=tuple(
+                pedestrian.position for pedestrian in pedestrians
+            ),
+            per_human_minimum_distances=(
+                compute_per_human_minimum_distances(
+                    robot_trajectory,
+                    pedestrian_trajectories,
+                )
+            ),
+            collision_human_indices=colliding_human_indices(
+                robot_trajectory,
+                pedestrian_trajectories,
+                HUMAN_COLLISION_DISTANCE,
+            ),
+            blocking_human_indices=tuple(
+                index
+                for index, pedestrian in enumerate(pedestrians)
+                if hypot(
+                    final_robot_position[0] - pedestrian.position[0],
+                    final_robot_position[1] - pedestrian.position[1],
+                )
+                <= STOP_DISTANCE
+            ),
+            minimum_predicted_separation=minimum_predicted_separation,
         )
         return result, trace
     finally:

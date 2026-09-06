@@ -64,6 +64,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def _format_optional(value: float | None) -> str:
     return "-" if value is None else f"{value:.3f}"
 
@@ -187,6 +194,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=_SCENARIO_MODES,
         default="controlled",
     )
+    parser.add_argument(
+        "--pedestrians",
+        "--pedestrian-count",
+        dest="pedestrians",
+        type=_non_negative_int,
+        default=1,
+        help="deterministic pedestrian count per scenario (default: 1)",
+    )
     return parser
 
 
@@ -195,9 +210,17 @@ def main() -> None:
 
     started_at = perf_counter()
     if args.scenario_mode == "controlled":
-        scenarios = generate_scenarios(args.episodes, args.seed)
+        scenarios = generate_scenarios(
+            args.episodes,
+            args.seed,
+            pedestrian_count=args.pedestrians,
+        )
     else:
-        scenarios = generate_diverse_scenarios(args.episodes, args.seed)
+        scenarios = generate_diverse_scenarios(
+            args.episodes,
+            args.seed,
+            pedestrian_count=args.pedestrians,
+        )
     spacetime_move_duration = scenarios[0].grid_scale / ROBOT_SPEED
     results_by_method = {method: [] for method in SUPPORTED_METHODS}
     traces_by_method = {method: [] for method in SUPPORTED_METHODS}
@@ -228,6 +251,7 @@ def main() -> None:
         "seed": args.seed,
         "episodes": args.episodes,
         "scenario_mode": args.scenario_mode,
+        "pedestrian_count": args.pedestrians,
         "configuration": {
             "simulation_dt": SIMULATION_STEP,
             "max_episode_steps": MAX_EPISODE_STEPS,
@@ -401,6 +425,35 @@ def main() -> None:
                             "robust_replan_failures": trace.robust_replan_failures,
                             "robust_planning_failure_reasons": list(trace.robust_planning_failure_reasons),
                             "robust_episode_failure_reason": trace.robust_episode_failure_reason,
+                            "pedestrian_count": trace.pedestrian_count,
+                            "initial_pedestrian_positions": [
+                                list(position)
+                                for position in trace.initial_pedestrian_positions
+                            ],
+                            "initial_pedestrian_velocities": [
+                                list(velocity)
+                                for velocity in trace.initial_pedestrian_velocities
+                            ],
+                            "pedestrian_targets": [
+                                list(target)
+                                for target in trace.pedestrian_targets
+                            ],
+                            "final_pedestrian_positions": [
+                                list(position)
+                                for position in trace.final_pedestrian_positions
+                            ],
+                            "per_human_minimum_distances": list(
+                                trace.per_human_minimum_distances
+                            ),
+                            "collision_human_indices": list(
+                                trace.collision_human_indices
+                            ),
+                            "blocking_human_indices": list(
+                                trace.blocking_human_indices
+                            ),
+                            "minimum_predicted_separation": (
+                                trace.minimum_predicted_separation
+                            ),
                         },
                     }
                     for scenario, result, trace in zip(

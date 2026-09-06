@@ -33,8 +33,10 @@ from .replanning import (
     interpolate_replanned_route,
     world_to_nearest_free_cell,
 )
+from .robust_reporting import summarize_robust_execution
 from .scenario import (
     DIVERSE_MIN_PATH_MOVES,
+    PedestrianSpec,
     Scenario,
     build_scenario_grid,
     generate_diverse_scenarios,
@@ -48,6 +50,7 @@ __all__ = [
     "LATE_STOPPED_FRACTION_THRESHOLD",
     "LONGEST_STOPPED_FRACTION_THRESHOLD",
     "MAX_EPISODE_STEPS",
+    "PedestrianSpec",
     "PATH_NEAR_THRESHOLD",
     "REPLAN_STOP_SECONDS",
     "REPLAN_STOP_STEPS",
@@ -76,5 +79,6 @@ __all__ = [
     "run_episode",
     "run_episode_with_trace",
     "stopped_fraction",
+    "summarize_robust_execution",
     "world_to_nearest_free_cell",
 ]

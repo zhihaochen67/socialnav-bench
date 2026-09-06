@@ -272,3 +272,31 @@ def find_clearance_recovery_path(
         ),
     )
     return list(fallback_path)
+
+def is_multi_clearance_safe_motion(
+    robot_position: Position,
+    pedestrian_positions: Iterable[Position],
+    intended_motion: Position,
+    *,
+    tolerance: float = CLEARANCE_EPSILON,
+) -> bool:
+    """Return whether motion is clearance-safe toward every pedestrian.
+
+    Every pedestrian must individually pass the existing single-human
+    clearance check, so an escape from one pedestrian can never move
+    dangerously toward another.  With one pedestrian this reproduces
+    :func:`is_clearance_safe_motion` exactly, and with none it is
+    unconstrained.
+    """
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be non-negative")
+
+    return all(
+        is_clearance_safe_motion(
+            robot_position,
+            pedestrian_position,
+            intended_motion,
+            tolerance=tolerance,
+        )
+        for pedestrian_position in pedestrian_positions
+    )

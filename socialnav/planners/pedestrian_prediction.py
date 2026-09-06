@@ -116,3 +116,28 @@ def compute_predictive_social_cost(
         )
         for occupancy_position, temporal_weight in zip(positions, weights)
     )
+
+PedestrianPredictionState = tuple[Position, Position, Position | None]
+
+
+def predict_multi_pedestrian_positions(
+    pedestrian_states: Iterable[PedestrianPredictionState],
+    time_seconds: float,
+) -> tuple[Position, ...]:
+    """Predict every pedestrian independently at one non-negative time.
+
+    Each pedestrian keeps its own constant-velocity, target-clamped
+    prediction; there is no learned model and no human-human interaction.
+    """
+    if time_seconds < 0.0:
+        raise ValueError("prediction time must be non-negative")
+
+    return tuple(
+        predict_pedestrian_position_at_time(
+            position,
+            velocity,
+            time_seconds,
+            target=target,
+        )
+        for position, velocity, target in pedestrian_states
+    )

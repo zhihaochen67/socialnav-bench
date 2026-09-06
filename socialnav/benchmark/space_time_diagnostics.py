@@ -9,8 +9,10 @@ from socialnav.env.demo_map import grid_to_world
 from socialnav.env.grid_map import Coordinate
 from socialnav.metrics import Position
 from socialnav.planners.pedestrian_prediction import (
+    PedestrianPredictionState,
     predict_pedestrian_position_at_time,
 )
+from socialnav.planners.space_time_planner import _collect_pedestrian_states
 from socialnav.planners.space_time_planner import (
     SpaceTimeAction,
     SpaceTimeActionSafety,
@@ -61,6 +63,7 @@ class SpaceTimePlanningCall:
     planned_wait_count: int
     returned_actions: tuple[SpaceTimeAction, ...]
     returned_timed_states: tuple[State, ...]
+    pedestrian_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,8 @@ def build_space_time_planning_call(
     move_duration: float,
     collision_distance: float,
     planning_result: SpaceTimePlanningResult,
+    additional_pedestrians: tuple[PedestrianPredictionState, ...] = (),
+    pedestrian_count: int | None = None,
 ) -> SpaceTimePlanningCall:
     """Attach continuous-pose and mapping evidence to a planner result."""
     mapped_center = grid_to_world(mapped_robot_grid_cell, grid_scale)
@@ -134,8 +139,15 @@ def build_space_time_planning_call(
                 grid_scale=grid_scale,
                 move_duration=move_duration,
                 collision_distance=collision_distance,
+                additional_pedestrians=additional_pedestrians,
             )
         )
+    )
+    resolved_pedestrian_count = (
+        (1 if pedestrian_position is not None else 0)
+        + len(additional_pedestrians)
+        if pedestrian_count is None
+        else pedestrian_count
     )
     mapped_start_artifact = (
         planning_result.plan is None
@@ -185,6 +197,7 @@ def build_space_time_planning_call(
         planned_wait_count=statistics.planned_wait_count,
         returned_actions=() if plan is None else plan.actions,
         returned_timed_states=() if plan is None else plan.timed_states,
+        pedestrian_count=resolved_pedestrian_count,
     )
 
 
@@ -193,13 +206,20 @@ def _actual_pose_action_is_safe(
     destination: Coordinate,
     *,
     actual_robot_world_position: Position,
-    pedestrian_position: Position,
+    pedestrian_position: Position | None,
     pedestrian_velocity: Position,
-    pedestrian_target: Position,
+    pedestrian_target: Position | None,
     grid_scale: float,
     move_duration: float,
     collision_distance: float,
+    additional_pedestrians: tuple[PedestrianPredictionState, ...] = (),
 ) -> bool:
+    pedestrians = _collect_pedestrian_states(
+        pedestrian_position,
+        pedestrian_velocity,
+        pedestrian_target,
+        additional_pedestrians,
+    )
     end_position = (
         actual_robot_world_position
         if action == "WAIT"
@@ -212,17 +232,18 @@ def _actual_pose_action_is_safe(
             actual_robot_world_position[1]
             + (end_position[1] - actual_robot_world_position[1]) * fraction,
         )
-        pedestrian_at_time = predict_pedestrian_position_at_time(
-            pedestrian_position,
-            pedestrian_velocity,
-            move_duration * fraction,
-            target=pedestrian_target,
-        )
-        if hypot(
-            robot_position[0] - pedestrian_at_time[0],
-            robot_position[1] - pedestrian_at_time[1],
-        ) <= collision_distance:
-            return False
+        for position, velocity, target in pedestrians:
+            pedestrian_at_time = predict_pedestrian_position_at_time(
+                position,
+                velocity,
+                move_duration * fraction,
+                target=target,
+            )
+            if hypot(
+                robot_position[0] - pedestrian_at_time[0],
+                robot_position[1] - pedestrian_at_time[1],
+            ) <= collision_distance:
+                return False
     return True
 
 

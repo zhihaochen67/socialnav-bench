@@ -1,42 +1,98 @@
 # SocialNav-Bench
 
-A reproducible benchmark for socially-aware robot navigation in dynamic multi-pedestrian environments.
+> **Status:** v1.0.0
 
-> **Status:** v1.0.0 release candidate
+SocialNav-Bench is a reproducible simulation benchmark for socially-aware robot
+navigation in dynamic multi-pedestrian environments. It covers classical
+planning, predictive and space-time reasoning, robust execution, safety
+shielding, evaluation, and systematic failure analysis.
 
-SocialNav-Bench studies how classical, social-aware, predictive, and space-time planners behave as pedestrian density increases. The project combines navigation algorithms, continuous execution, safety-aware local control, reproducible benchmarking, and systematic failure analysis.
+Python 3.10+ · PyBullet · Matplotlib · pytest
 
-## Highlights
+## Why it matters
 
-- Reproducible dynamic pedestrian navigation benchmark
-- Classical A* and reactive dynamic-avoidance baselines
-- Social-aware and predictive social planning
-- Space-Time Social A* with explicit MOVE / WAIT reasoning
-- Robust continuous execution with replanning and collision egress
-- Predictive local safety shield for multi-human navigation
-- Arbitrary multi-pedestrian scenarios
-- Density benchmarks at 1 / 3 / 5 / 10 pedestrians
-- Failure taxonomy, diagnostics, and social-weight ablations
-- 491 automated tests
+Navigation methods that work in static maps can fail when people move through,
+occupy, or block the same space as the robot. SocialNav-Bench makes those
+failures measurable across deterministic, seeded scenarios, then preserves the
+evidence needed to distinguish planning limits from persistent environmental
+blockages.
 
-## Benchmark Snapshot
+## Demo
 
-100 diverse episodes per density, seed 42.
+This representative replay uses the same frozen seeded scenario and unchanged
+initial conditions for both methods:
+`diverse-seed-42-episode-0024-pedestrians-3` (`N=3`). Robust Space-Time Social
+collides and then times out; Shielded Space-Time Social avoids the collision and
+succeeds. This single episode illustrates the safety shield's behavior—it is
+not a summary of every benchmark episode.
 
-| Pedestrians | Method | Success | Collision | SPL | Min Human Distance | Social Violation |
+https://github.com/user-attachments/assets/5b87a529-a890-437a-a3f0-883b893f7c42
+
+![Trajectory comparison for the same frozen demo episode](docs/assets/trajectory_comparison.png)
+
+## Headline benchmark results
+
+The frozen Phase 7D comparison uses 100 diverse episodes per density with seed
+42. The predictive local safety shield reduces collision rate from **18% to 0%**
+at `N=3`, **23% to 1%** at `N=5`, and **43% to 7%** at `N=10` while preserving
+the underlying robust space-time planner.
+
+| Pedestrians | Method | Success | Collision | SPL | Min human distance (m) | Social violation rate |
 |---:|---|---:|---:|---:|---:|---:|
-| 3 | Robust Space-Time | 81% | 18% | 0.671 | 0.502 | 0.351 |
-| 3 | **Shielded Space-Time** | **84%** | **0%** | **0.678** | **0.644** | **0.102** |
-| 5 | Robust Space-Time | 38% | 23% | 0.303 | 0.486 | 0.452 |
-| 5 | **Shielded Space-Time** | **47%** | **1%** | **0.344** | **0.648** | **0.104** |
-| 10 | Robust Space-Time | 11% | 43% | 0.089 | 0.397 | 0.360 |
-| 10 | **Shielded Space-Time** | **18%** | **7%** | **0.123** | **0.549** | **0.117** |
+| 3 | Robust Space-Time Social | 81% | 18% | 0.671 | 0.502 | 0.351 |
+| 3 | **Shielded Space-Time Social** | **84%** | **0%** | **0.678** | **0.644** | **0.102** |
+| 5 | Robust Space-Time Social | 38% | 23% | 0.303 | 0.486 | 0.452 |
+| 5 | **Shielded Space-Time Social** | **47%** | **1%** | **0.344** | **0.648** | **0.104** |
+| 10 | Robust Space-Time Social | 11% | 43% | 0.089 | 0.397 | 0.360 |
+| 10 | **Shielded Space-Time Social** | **18%** | **7%** | **0.123** | **0.549** | **0.117** |
 
-The predictive local safety shield substantially reduces collisions in dense multi-pedestrian scenarios while preserving the underlying robust space-time planner.
+Collision reduction is substantial, but dense-task completion remains
+difficult: Shielded Space-Time Social succeeds in only **18%** of the frozen
+`N=10` episodes.
 
-## Benchmark Trends
+## Navigation methods
 
-The figures below are generated directly from the frozen 100-episode, seed-42 density benchmark.
+The method progression is concise by design:
+
+`A*` → dynamic avoidance → social-aware A* → online replanning and recovery →
+predictive social planning → Space-Time Social → Robust Space-Time Social →
+multi-pedestrian evaluation → predictive local safety shield
+
+The strongest completed method is `social_spacetime_shielded`. It combines
+robust space-time planning with predictive local MOVE/WAIT safety checks,
+deterministic physical overrides, and immediate post-override replanning. The
+benchmark also retains the earlier static, reactive, social-cost, predictive,
+and space-time baselines for controlled comparisons.
+
+## Benchmark design
+
+- Deterministic, seeded scenario generation keeps each method comparison on the
+  same initial conditions.
+- The density runner supports `N=1`, `N=3`, `N=5`, and `N=10`; the frozen
+  headline Robust-versus-Shielded comparison covers `N=3`, `N=5`, and `N=10`.
+- Each headline row aggregates 100 diverse episodes generated with seed 42.
+- Planning, continuous execution, local safety behavior, and failure evidence
+  are evaluated through the same PyBullet simulation pipeline.
+
+The algorithms, scenario semantics, metrics, timeouts, social weights, robot
+speed, benchmark results, and demo trajectories are frozen for this release
+candidate.
+
+## Metrics
+
+SocialNav-Bench reports:
+
+- success rate and collision rate
+- path length and time to goal
+- Success weighted by Path Length (SPL)
+- minimum human distance
+- social violation rate
+
+## Benchmark trends
+
+These figures are generated from the same frozen 100-episode, seed-42 density
+comparison. They show the safety improvement alongside the decline in task
+completion and SPL as pedestrian density increases.
 
 ![Success and collision rates versus pedestrian density](docs/assets/success_collision_vs_density.png)
 
@@ -44,162 +100,41 @@ The figures below are generated directly from the frozen 100-episode, seed-42 de
 
 ![SPL versus pedestrian density](docs/assets/spl_vs_density.png)
 
-Shielded execution sharply reduces collision rate at every tested density. The success-rate improvements are more modest, and the N=10 scenarios remain challenging; these results do not imply that dense-crowd navigation is solved.
+## Failure analysis
 
-Reproduce the headline comparison and regenerate the figures from repository
-commands alone with:
+Failure analysis is a first-class benchmark output, not an afterthought. The
+runtime `planner_failure_reason` records the immediate planner-level outcome;
+the post-run `diagnostic_failure_category` records the evidence-based diagnosis.
+Some residual failures originally surfaced as `time_horizon_exhausted`, while
+diagnostics showed that certain cases were actually
+`persistent_dynamic_blockage`: terminal stationary pedestrians had formed
+multi-human cut sets that continued to block every feasible route.
 
-```bash
-python experiments/run_density_benchmark.py \
-  --episodes 100 \
-  --seed 42 \
-  --pedestrians 3,5,10 \
-  --methods social_spacetime_robust,social_spacetime_shielded \
-  --output outputs/reproduced_shield_density_benchmark_seed42.json
-python experiments/plot_benchmark_results.py \
-  --input outputs/reproduced_shield_density_benchmark_seed42.json \
-  --output-dir docs/assets
-```
+Keeping those two fields separate avoids treating a planning symptom as the
+underlying environmental cause.
 
-The generated JSON remains under the gitignored `outputs/` directory. The
-published figures are tracked under `docs/assets/`.
+## Reproduce the results
 
-## Demo
-
-The same frozen seed-42, three-pedestrian episode is replayed below for Robust
-and Shielded Space-Time Social. Robust collides and times out; Shielded avoids
-the collision and reaches the goal without changing the scenario or initial
-conditions.
-
-![Robust versus Shielded Space-Time Social demo](docs/assets/socialnav_demo_preview.gif)
-
-[Watch the higher-quality MP4](docs/assets/socialnav_demo.mp4)
-
-![Trajectory comparison for the demo episode](docs/assets/trajectory_comparison.png)
-
-Reproduce both animations and the trajectory figure with:
-
-```bash
-python experiments/render_demo.py \
-  --scenario-id diverse-seed-42-episode-0024-pedestrians-3
-```
-
-The renderer uses a system `ffmpeg` when available and otherwise uses the
-`imageio-ffmpeg` binary installed by `requirements.txt`.
-
-## Navigation Methods
-
-The benchmark currently includes:
-
-- `astar`
-- `dynamic`
-- `social`
-- `social_replan`
-- `social_replan_escape`
-- `social_replan_recovery`
-- `social_predictive`
-- `social_predictive_replan`
-- `social_spacetime`
-- `social_spacetime_replan`
-- `social_spacetime_robust`
-- `social_spacetime_shielded`
-
-The latest method combines robust space-time planning with predictive local MOVE / WAIT safety checks, deterministic physical overrides, and immediate post-override replanning.
-
-## Evaluation Metrics
-
-SocialNav-Bench evaluates navigation using:
-
-- Success rate
-- Collision rate
-- Path length
-- Time to goal
-- SPL
-- Minimum human distance
-- Social violation rate
-
-## Project Structure
-
-```text
-socialnav-bench/
-├── socialnav/       # planners, simulation, benchmark and evaluation code
-├── experiments/     # benchmark, ablation and failure-analysis scripts
-├── tests/           # regression and behavior tests
-├── outputs/         # generated experiment artifacts (gitignored)
-├── requirements.txt # runtime, plotting and test dependencies
-└── README.md
-```
-
-## Requirements and Installation
-
-The project supports Python 3.10 or newer and was audited on Python 3.10 and
-3.11. From the repository root, create and activate an isolated environment,
-then install the tracked dependencies. With conda:
-
-```bash
-conda create --name socialnav python=3.10 -y
-conda activate socialnav
-python -m pip install -r requirements.txt
-```
-
-Or with the standard-library virtual environment module:
+Run all commands from the repository root. Create an isolated Python 3.10+
+environment, then install the tracked dependencies:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 On Debian or Ubuntu, install the `python3-venv` operating-system package first
-if `python3 -m venv` reports that `ensurepip` is unavailable.
+if `ensurepip` is unavailable.
 
-`requirements.txt` installs PyBullet, Matplotlib (and its transitive NumPy
-dependency), and pytest. The tracked project code does not import Pandas, so
-Pandas is not required. Run all commands below from the repository root; no
-custom `PYTHONPATH` is needed.
-
-## Run the Tests
-
-From the project root:
+Run the test suite:
 
 ```bash
 python -m pytest -q
 ```
 
-Current verified state:
-
-```text
-491 passed
-```
-
-## Run the Interactive Demo
-
-The minimal PyBullet demo compares geometric and social-aware paths and follows
-the social-aware path in a GUI window:
-
-```bash
-python -m socialnav.env.world
-```
-
-A desktop display is required. Close the PyBullet window or press `Ctrl+C` to
-stop the demo. Tests and benchmark scripts run headlessly.
-
-## Reproducible Experiments
-
-Run the twelve-method benchmark on the diverse one-pedestrian scenario set:
-
-```bash
-python experiments/run_benchmark.py \
-  --episodes 100 \
-  --seed 42 \
-  --scenario-mode diverse \
-  --pedestrians 1
-```
-
-This writes `outputs/benchmark_diverse_seed42.json`.
-
-Run the full density benchmark at the supported pedestrian counts:
+Run the complete supported density sweep:
 
 ```bash
 python experiments/run_density_benchmark.py \
@@ -208,71 +143,69 @@ python experiments/run_density_benchmark.py \
   --pedestrians 1,3,5,10
 ```
 
-This writes `outputs/density_benchmark_seed42.json`. To run only the two methods
-shown in the benchmark snapshot, pass
-`--methods social_spacetime_robust,social_spacetime_shielded` and choose a
-separate path with `--output` rather than overwriting the frozen artifact.
-
-Failure-analysis and diagnostic entry points are:
+To reproduce only the headline comparison without overwriting the frozen
+artifact, use a separate output path:
 
 ```bash
-python experiments/analyze_failures.py \
-  --episodes 100 --seed 42 \
-  --method social_spacetime_replan \
-  --scenario-mode diverse
-python experiments/diagnose_spacetime_failures.py \
-  --episodes 100 --seed 42 \
-  --scenario-mode diverse \
-  --method social_spacetime_replan
-python experiments/analyze_multi_human_failures.py
-python experiments/run_social_weight_ablation.py
+python experiments/run_density_benchmark.py \
+  --episodes 100 \
+  --seed 42 \
+  --pedestrians 3,5,10 \
+  --methods social_spacetime_robust,social_spacetime_shielded \
+  --output outputs/reproduced_shield_density_benchmark_seed42.json
 ```
 
-The last two scripts intentionally use their fixed Phase 7C configurations and
-do not accept command-line options. All benchmark and analysis JSON is written
-under `outputs/`, which is gitignored because the files can be large. The six
-published benchmark figures under `docs/assets/` are intentionally tracked.
+Regenerate the benchmark plots from that JSON:
 
-The current experiment and visualization entry points are:
+```bash
+python experiments/plot_benchmark_results.py \
+  --input outputs/reproduced_shield_density_benchmark_seed42.json \
+  --output-dir docs/assets
+```
+
+Reproduce the representative demo, including the animation and trajectory
+comparison:
+
+```bash
+python experiments/render_demo.py \
+  --scenario-id diverse-seed-42-episode-0024-pedestrians-3
+```
+
+The renderer uses a system `ffmpeg` when available and otherwise uses the
+`imageio-ffmpeg` binary installed through `requirements.txt`. Generated JSON is
+written under the gitignored `outputs/` directory; the release figures and demo
+assets are tracked under `docs/assets/`.
+
+## Project structure
 
 ```text
-experiments/run_benchmark.py
-experiments/run_density_benchmark.py
-experiments/run_social_weight_ablation.py
-experiments/analyze_failures.py
-experiments/analyze_multi_human_failures.py
-experiments/diagnose_spacetime_failures.py
-experiments/plot_benchmark_results.py
-socialnav/env/world.py
+socialnav-bench/
+├── socialnav/
+│   ├── benchmark/   # scenarios, runners, aggregation, and diagnostics
+│   ├── planners/    # classical, social, predictive, space-time, and shield logic
+│   ├── env/         # PyBullet environment and pedestrian simulation
+│   ├── evaluation/  # episode-level evaluation
+│   └── metrics/     # navigation and social metrics
+├── experiments/     # benchmark, analysis, plotting, and demo entry points
+├── tests/           # regression and behavior tests
+├── docs/assets/     # tracked figures, GIF, MP4, and trajectory comparison
+├── requirements.txt
+└── LICENSE
 ```
-
-The benchmark uses deterministic seeds and fixed scenario-generation semantics so planner comparisons can be reproduced consistently.
 
 ## Limitations
 
-- Dense multi-human task completion remains difficult: the shielded method
-  succeeds in only 18% of the frozen N=10 episodes.
-- Pedestrians follow simplified deterministic straight-line motion and stop at
-  their terminal target positions. These stationary terminal pedestrians can
-  create persistent dynamic cut-set blockages.
-- Evaluation is entirely simulation-based; this is not a real-robot deployment.
-- The benchmark compares the method family implemented in this repository. It
-  does not claim to outperform every canonical social-navigation method.
+- Evaluation is simulation-only, with no real-robot validation.
+- Pedestrian motion is simplified and deterministic.
+- Pedestrians stop indefinitely at their terminal targets.
+- Stationary terminal pedestrians can create persistent dynamic cut-set
+  blockages involving multiple humans.
+- High-density multi-human task completion remains difficult; the frozen
+  `N=10` Shielded success rate is only 18%.
+- The benchmark makes no claim of outperforming all canonical
+  social-navigation systems.
 
-## Release Status
+## License
 
-The latest failure analysis shows that predictive local shielding removes most stationary pedestrian-into-robot collisions. The remaining dense-crowd failures are dominated by post-override replanning and finite-horizon planning limitations.
-
-The core algorithms, scenario semantics, metrics, and Phase 7D benchmark results
-are frozen for the forthcoming v1.0.0 release. Release tagging and packaging are
-not performed by this audit.
-
-## Tech Stack
-
-Python 3.10+ · PyBullet · Matplotlib · pytest
-
-## Author
-
-**Zhihao Chen**
-
-Computer Science, Nanjing University of Posts and Telecommunications
+SocialNav-Bench is available under the [MIT License](LICENSE).
+Copyright (c) 2026 Zhihao Chen.

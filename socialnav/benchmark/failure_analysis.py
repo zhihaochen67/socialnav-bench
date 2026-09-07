@@ -9,6 +9,7 @@ behavior, scenario generation, or the episode timeout.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 from math import hypot
 from statistics import mean, median
 
@@ -16,6 +17,7 @@ from socialnav.benchmark.diagnostics import EpisodeTrace
 from socialnav.benchmark.replanning import world_to_nearest_free_cell
 from socialnav.benchmark.scenario import Scenario, build_scenario_grid
 from socialnav.env.demo_map import SOCIAL_DISTANCE, grid_to_world
+from socialnav.env.grid_map import GridMap
 from socialnav.env.pedestrian import compute_pedestrian_velocity
 from socialnav.env.world import (
     HUMAN_COLLISION_DISTANCE,
@@ -82,7 +84,6 @@ _REQUIRED_GRID_FAILURE_REASONS = {
     "time_horizon_exhausted",
     "goal_unreachable_static",
 }
-
 
 # ---------------------------------------------------------------------------
 # Geometric helpers
@@ -180,6 +181,45 @@ class TerminalBlockageEvidence:
     target_on_or_near_route_count: int
 
 
+@dataclass(frozen=True)
+class PersistentBlockerEvidence:
+    """Final-state evidence for one pedestrian in the topology probe.
+
+    ``pedestrian_id`` is the stable zero-based scenario-order identifier used
+    throughout the benchmark's multi-human diagnostics.
+    """
+
+    pedestrian_id: int
+    position: Position
+    target: Position
+    velocity: Position
+    terminal: bool
+    stationary: bool
+    persistently_collision_relevant: bool
+    persistent_terminal_candidate: bool
+    unsafe_cells: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class PersistentDynamicBlockageDiagnostic:
+    """Static-connectivity evidence refining a raw planner failure reason."""
+
+    planner_failure_reason: str | None
+    diagnostic_failure_category: str
+    persistent_dynamic_blockage: bool
+    persistent_blockage_type: str | None
+    robot_cell: tuple[int, int]
+    goal_cell: tuple[int, int]
+    blocking_pedestrian_ids: tuple[int, ...]
+    blocking_cells: tuple[tuple[int, int], ...]
+    blocker_count: int
+    static_connectivity: bool
+    connectivity_with_persistent_blockers: bool
+    removing_dynamic_blockers_restores_static_connectivity: bool
+    multiple_humans_jointly_form_cut: bool
+    pedestrian_evidence: tuple[PersistentBlockerEvidence, ...]
+
+
 def pedestrian_at_target(
     position: Position,
     target: Position,
@@ -189,6 +229,219 @@ def pedestrian_at_target(
     """Return whether a pedestrian is at its target within the fixed epsilon."""
     return (
         hypot(position[0] - target[0], position[1] - target[1]) <= epsilon
+    )
+
+
+def _latest_planner_failure_reason(trace: EpisodeTrace) -> str | None:
+    for call in reversed(trace.space_time_planning_calls):
+        if call.failure_reason is not None:
+            return call.failure_reason
+    if trace.robust_planning_failure_reasons:
+        return trace.robust_planning_failure_reasons[-1]
+    return None
+
+
+def _is_grid_connected(
+    grid_map: GridMap,
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    blocked_cells: set[tuple[int, int]],
+) -> bool:
+    """Four-connected reachability on the static map plus probe-only cells."""
+    if (
+        not grid_map.is_free(start)
+        or not grid_map.is_free(goal)
+        or start in blocked_cells
+        or goal in blocked_cells
+    ):
+        return False
+
+    frontier = [start]
+    visited = {start}
+    while frontier:
+        current = frontier.pop()
+        if current == goal:
+            return True
+        for delta_x, delta_y in _ACTION_OFFSETS.values():
+            if (delta_x, delta_y) == (0, 0):
+                continue
+            neighbor = (current[0] + delta_x, current[1] + delta_y)
+            if (
+                neighbor not in visited
+                and neighbor not in blocked_cells
+                and grid_map.is_free(neighbor)
+            ):
+                visited.add(neighbor)
+                frontier.append(neighbor)
+    return False
+
+
+def _blocked_cells_for(
+    pedestrian_ids: tuple[int, ...],
+    unsafe_by_id: dict[int, set[tuple[int, int]]],
+) -> set[tuple[int, int]]:
+    return (
+        set().union(
+            *(unsafe_by_id[pedestrian_id] for pedestrian_id in pedestrian_ids)
+        )
+        if pedestrian_ids
+        else set()
+    )
+
+
+def diagnose_persistent_dynamic_blockage(
+    scenario: Scenario,
+    trace: EpisodeTrace,
+    *,
+    planner_failure_reason: str | None = None,
+    collision_distance: float = HUMAN_COLLISION_DISTANCE,
+) -> PersistentDynamicBlockageDiagnostic:
+    """Refine a failed space-time plan using final pedestrian topology.
+
+    The probe is deliberately outside the planner. It maps the robot's final
+    pose to the nearest statically free cell, marks every free cell whose
+    centre is within the planner's conservative collision radius (``<=``) of
+    a pedestrian that is both at its target and stationary, then performs
+    four-connected reachability. If the static map is connected but the
+    augmented map is not, the smallest deterministic pedestrian subset that
+    disconnects robot and goal is reported as the blocking cut set.
+    """
+    if collision_distance <= 0.0:
+        raise ValueError("collision_distance must be positive")
+
+    raw_reason = (
+        _latest_planner_failure_reason(trace)
+        if planner_failure_reason is None
+        else planner_failure_reason
+    )
+    grid_map = build_scenario_grid(scenario)
+    robot_cell = world_to_nearest_free_cell(
+        grid_map,
+        trace.final_robot_position,
+        scenario.grid_scale,
+    )
+    final_positions = trace.final_pedestrian_positions
+    if not final_positions and len(scenario.pedestrians) == 1:
+        final_positions = (trace.final_pedestrian_position,)
+
+    pedestrian_rows = []
+    unsafe_by_id: dict[int, set[tuple[int, int]]] = {}
+    for pedestrian_id, (position, spec) in enumerate(
+        zip(final_positions, scenario.pedestrians)
+    ):
+        velocity = compute_pedestrian_velocity(position, spec.target, spec.speed)
+        # Match the runtime Pedestrian semantics: exact target equality makes
+        # the pedestrian terminal, and its derived velocity is then exactly
+        # zero.  Keep the checks separate so both facts remain observable.
+        terminal = position == spec.target
+        stationary = velocity == (0.0, 0.0)
+        unsafe_cells = set()
+        for x in range(grid_map.width):
+            for y in range(grid_map.height):
+                cell = (x, y)
+                if not grid_map.is_free(cell):
+                    continue
+                cell_position = grid_to_world(cell, scenario.grid_scale)
+                if (
+                    hypot(
+                        cell_position[0] - position[0],
+                        cell_position[1] - position[1],
+                    )
+                    <= collision_distance
+                ):
+                    unsafe_cells.add(cell)
+        collision_relevant = bool(unsafe_cells)
+        persistent_candidate = (
+            terminal and stationary and collision_relevant
+        )
+        if persistent_candidate:
+            unsafe_by_id[pedestrian_id] = unsafe_cells
+        pedestrian_rows.append(
+            PersistentBlockerEvidence(
+                pedestrian_id=pedestrian_id,
+                position=position,
+                target=spec.target,
+                velocity=velocity,
+                terminal=terminal,
+                stationary=stationary,
+                persistently_collision_relevant=persistent_candidate,
+                persistent_terminal_candidate=persistent_candidate,
+                unsafe_cells=tuple(sorted(unsafe_cells)),
+            )
+        )
+
+    static_connectivity = _is_grid_connected(
+        grid_map,
+        robot_cell,
+        scenario.goal,
+        set(),
+    )
+    candidate_ids = tuple(sorted(unsafe_by_id))
+    all_blocked_cells = _blocked_cells_for(candidate_ids, unsafe_by_id)
+    dynamic_connectivity = _is_grid_connected(
+        grid_map,
+        robot_cell,
+        scenario.goal,
+        all_blocked_cells,
+    )
+    blocking_ids: tuple[int, ...] = ()
+    if static_connectivity and not dynamic_connectivity:
+        for subset_size in range(1, len(candidate_ids) + 1):
+            blocking_ids = next(
+                (
+                    subset
+                    for subset in combinations(candidate_ids, subset_size)
+                    if not _is_grid_connected(
+                        grid_map,
+                        robot_cell,
+                        scenario.goal,
+                        _blocked_cells_for(subset, unsafe_by_id),
+                    )
+                ),
+                (),
+            )
+            if blocking_ids:
+                break
+
+    blocking_cells = _blocked_cells_for(blocking_ids, unsafe_by_id)
+    persistent_blockage = bool(blocking_ids)
+    if not static_connectivity:
+        diagnostic_category = "static_goal_unreachable"
+    elif persistent_blockage:
+        diagnostic_category = "persistent_dynamic_blockage"
+    elif raw_reason is not None:
+        diagnostic_category = raw_reason
+    elif trace.robust_episode_failure_reason is not None:
+        diagnostic_category = trace.robust_episode_failure_reason
+    elif trace.timed_out:
+        diagnostic_category = "episode_timeout"
+    else:
+        diagnostic_category = "other"
+
+    multiple_human_cut = len(blocking_ids) > 1
+    return PersistentDynamicBlockageDiagnostic(
+        planner_failure_reason=raw_reason,
+        diagnostic_failure_category=diagnostic_category,
+        persistent_dynamic_blockage=persistent_blockage,
+        persistent_blockage_type=(
+            "multi_human_corridor_cut_set_blockage"
+            if multiple_human_cut
+            else "terminal_pedestrian_blockage"
+            if persistent_blockage
+            else None
+        ),
+        robot_cell=robot_cell,
+        goal_cell=scenario.goal,
+        blocking_pedestrian_ids=blocking_ids,
+        blocking_cells=tuple(sorted(blocking_cells)),
+        blocker_count=len(blocking_ids),
+        static_connectivity=static_connectivity,
+        connectivity_with_persistent_blockers=dynamic_connectivity,
+        removing_dynamic_blockers_restores_static_connectivity=(
+            persistent_blockage and static_connectivity
+        ),
+        multiple_humans_jointly_form_cut=multiple_human_cut,
+        pedestrian_evidence=tuple(pedestrian_rows),
     )
 
 

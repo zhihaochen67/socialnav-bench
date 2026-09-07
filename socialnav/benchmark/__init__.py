@@ -21,6 +21,12 @@ from .diagnostics import (
     point_to_route_distance,
     stopped_fraction,
 )
+from .failure_analysis import (
+    PersistentBlockerEvidence,
+    PersistentDynamicBlockageDiagnostic,
+    diagnose_persistent_dynamic_blockage,
+)
+
 from .runner import (
     MAX_EPISODE_STEPS,
     SUPPORTED_METHODS,
@@ -87,4 +93,7 @@ __all__ = [
     "summarize_robust_execution",
     "summarize_shield_execution",
     "world_to_nearest_free_cell",
+    "PersistentBlockerEvidence",
+    "PersistentDynamicBlockageDiagnostic",
+    "diagnose_persistent_dynamic_blockage",
 ]

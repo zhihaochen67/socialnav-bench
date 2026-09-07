@@ -6,7 +6,52 @@ from dataclasses import asdict
 from socialnav.evaluation import EpisodeResult
 
 from .diagnostics import EpisodeTrace
+from .failure_analysis import diagnose_persistent_dynamic_blockage
 from .scenario import Scenario
+
+
+def _remaining_failure_record(
+    scenario: Scenario,
+    trace: EpisodeTrace,
+) -> dict[str, object]:
+    diagnosis = diagnose_persistent_dynamic_blockage(scenario, trace)
+    blocker_ids = set(diagnosis.blocking_pedestrian_ids)
+    blockers = [
+        asdict(evidence)
+        for evidence in diagnosis.pedestrian_evidence
+        if evidence.pedestrian_id in blocker_ids
+    ]
+    return {
+        "scenario_id": scenario.scenario_id,
+        "reason": trace.robust_episode_failure_reason,
+        "planner_failure_reason": diagnosis.planner_failure_reason,
+        "diagnostic_failure_category": (
+            diagnosis.diagnostic_failure_category
+        ),
+        "persistent_dynamic_blockage": (
+            diagnosis.persistent_dynamic_blockage
+        ),
+        "persistent_blockage_type": diagnosis.persistent_blockage_type,
+        "blocking_pedestrian_ids": list(
+            diagnosis.blocking_pedestrian_ids
+        ),
+        "blocking_cells": [
+            list(cell) for cell in diagnosis.blocking_cells
+        ],
+        "blocker_count": diagnosis.blocker_count,
+        "blockers": blockers,
+        "static_connectivity": diagnosis.static_connectivity,
+        "connectivity_with_persistent_blockers": (
+            diagnosis.connectivity_with_persistent_blockers
+        ),
+        "removing_dynamic_blockers_restores_static_connectivity": (
+            diagnosis.removing_dynamic_blockers_restores_static_connectivity
+        ),
+        "multiple_humans_jointly_form_cut": (
+            diagnosis.multiple_humans_jointly_form_cut
+        ),
+        "persistent_blockage_probe": asdict(diagnosis),
+    }
 
 
 def summarize_robust_execution(
@@ -81,10 +126,7 @@ def summarize_robust_execution(
             )
         ),
         "remaining_failures": [
-            {
-                "scenario_id": scenario.scenario_id,
-                "reason": trace.robust_episode_failure_reason,
-            }
+            _remaining_failure_record(scenario, trace)
             for scenario, result, trace in zip(scenarios, results, traces)
             if not result.success
         ],
@@ -180,10 +222,7 @@ def summarize_shield_execution(
         ),
         "collision_evidence": collision_evidence,
         "remaining_failures": [
-            {
-                "scenario_id": scenario.scenario_id,
-                "reason": trace.robust_episode_failure_reason,
-            }
+            _remaining_failure_record(scenario, trace)
             for scenario, result, trace in zip(scenarios, results, traces)
             if not result.success
         ],

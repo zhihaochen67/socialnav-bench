@@ -64,6 +64,29 @@ python experiments/plot_benchmark_results.py \
 The generated JSON remains under the gitignored `outputs/` directory. The
 published figures are tracked under `docs/assets/`.
 
+## Demo
+
+The same frozen seed-42, three-pedestrian episode is replayed below for Robust
+and Shielded Space-Time Social. Robust collides and times out; Shielded avoids
+the collision and reaches the goal without changing the scenario or initial
+conditions.
+
+![Robust versus Shielded Space-Time Social demo](docs/assets/socialnav_demo_preview.gif)
+
+[Watch the higher-quality MP4](docs/assets/socialnav_demo.mp4)
+
+![Trajectory comparison for the demo episode](docs/assets/trajectory_comparison.png)
+
+Reproduce both animations and the trajectory figure with:
+
+```bash
+python experiments/render_demo.py \
+  --scenario-id diverse-seed-42-episode-0024-pedestrians-3
+```
+
+The renderer uses a system `ffmpeg` when available and otherwise uses the
+`imageio-ffmpeg` binary installed by `requirements.txt`.
+
 ## Navigation Methods
 
 The benchmark currently includes:

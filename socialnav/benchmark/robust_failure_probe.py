@@ -15,6 +15,7 @@ from socialnav.benchmark.diagnostics import EpisodeTrace
 from socialnav.benchmark.failure_analysis import EpisodeEvidence
 from socialnav.benchmark.robust_space_time_runner import (
     ROBUST_SPACE_TIME_METHOD,
+    SHIELDED_SPACE_TIME_METHOD,
     run_robust_space_time_episode_with_trace,
 )
 from socialnav.benchmark.runner import (
@@ -37,10 +38,11 @@ _PROBE_PATCH_ATTRIBUTES = (
 def run_robust_episode_with_evidence(
     scenario: Scenario,
     *,
+    method: str = ROBUST_SPACE_TIME_METHOD,
     max_steps: int = MAX_EPISODE_STEPS,
     replan_stop_steps: int = REPLAN_STOP_STEPS,
 ) -> tuple[EpisodeResult, EpisodeTrace, EpisodeEvidence]:
-    """Run one robust episode and record trajectories plus per-step phases.
+    """Run one robust-family episode and record trajectories plus phases.
 
     The recorded phases are ``"start"``, ``"no_plan"``, ``"bridge"``,
     ``"WAIT"``, and ``"MOVE"``.  A step is attributed to ``no_plan`` when no
@@ -49,6 +51,15 @@ def run_robust_episode_with_evidence(
     nonzero speed scale are intentional WAITs, and bridge steps are detected
     directly from bridge interpolation calls.
     """
+    if method not in (
+        ROBUST_SPACE_TIME_METHOD,
+        SHIELDED_SPACE_TIME_METHOD,
+    ):
+        raise ValueError(
+            "evidence probe method must be one of "
+            f"{ROBUST_SPACE_TIME_METHOD}, {SHIELDED_SPACE_TIME_METHOD}"
+        )
+
     positions_by_body: dict[int, list[Position]] = {}
     radius_by_body: dict[int, float] = {}
     step_bridge_flags: list[bool] = []
@@ -92,7 +103,7 @@ def run_robust_episode_with_evidence(
     try:
         result, trace = run_robust_space_time_episode_with_trace(
             scenario,
-            ROBUST_SPACE_TIME_METHOD,
+            method,
             max_steps=max_steps,
             replan_stop_steps=replan_stop_steps,
         )

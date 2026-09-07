@@ -75,8 +75,7 @@ and space-time baselines for controlled comparisons.
   are evaluated through the same PyBullet simulation pipeline.
 
 The algorithms, scenario semantics, metrics, timeouts, social weights, robot
-speed, benchmark results, and demo trajectories are frozen for this release
-candidate.
+speed, benchmark results, and demo trajectories are frozen for v1.0.0.
 
 ## Metrics
 

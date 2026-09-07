@@ -1,4 +1,4 @@
-"""Generate reproducible density-benchmark figures from frozen JSON results."""
+"""Generate figures from frozen or density-runner benchmark JSON."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ DEFAULT_INPUT = Path("outputs/shield_density_benchmark_seed42.json")
 DEFAULT_OUTPUT_DIR = Path("docs/assets")
 REQUIRED_DENSITIES = (3, 5, 10)
 METHODS = ("robust", "shielded")
+RUNNER_METHODS = {
+    "robust": "social_spacetime_robust",
+    "shielded": "social_spacetime_shielded",
+}
 METRICS = (
     "success_rate",
     "collision_rate",
@@ -89,6 +93,47 @@ def _require_metric(
     return resolved
 
 
+def _resolve_method_rows(
+    root: dict[str, object],
+    method: str,
+) -> dict[str, object]:
+    """Resolve one plot series from frozen or density-runner JSON."""
+    if method in root:
+        return _require_mapping(root[method], f"{method} results")
+
+    if "per_density" not in root:
+        raise BenchmarkFormatError(
+            f"benchmark root is missing required method {method!r}"
+        )
+
+    per_density = _require_mapping(
+        root["per_density"],
+        "benchmark per_density",
+    )
+    runner_method = RUNNER_METHODS[method]
+    method_rows: dict[str, object] = {}
+    for density_key, density_value in per_density.items():
+        density_row = _require_mapping(
+            density_value,
+            f"density {density_key}",
+        )
+        if "per_method" not in density_row:
+            continue
+        per_method = _require_mapping(
+            density_row["per_method"],
+            f"density {density_key} per_method",
+        )
+        if runner_method in per_method:
+            method_rows[density_key] = per_method[runner_method]
+
+    if not method_rows:
+        raise BenchmarkFormatError(
+            "density-runner results are missing required method "
+            f"{runner_method!r}"
+        )
+    return method_rows
+
+
 def load_benchmark_data(input_path: Path) -> BenchmarkData:
     """Load and validate Robust/Shielded series from a benchmark artifact."""
     try:
@@ -105,11 +150,7 @@ def load_benchmark_data(input_path: Path) -> BenchmarkData:
     root = _require_mapping(document, "benchmark root")
     series: dict[str, dict[str, tuple[float, ...]]] = {}
     for method in METHODS:
-        if method not in root:
-            raise BenchmarkFormatError(
-                f"benchmark root is missing required method {method!r}"
-            )
-        method_rows = _require_mapping(root[method], f"{method} results")
+        method_rows = _resolve_method_rows(root, method)
         values: dict[str, list[float]] = {metric: [] for metric in METRICS}
         for density in REQUIRED_DENSITIES:
             density_key = str(density)
@@ -259,7 +300,7 @@ def generate_figures(data: BenchmarkData, output_dir: Path) -> tuple[Path, ...]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Plot frozen Robust vs Shielded density-benchmark results."
+        description="Plot Robust vs Shielded density-benchmark results."
     )
     parser.add_argument(
         "--input",

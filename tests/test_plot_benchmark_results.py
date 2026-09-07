@@ -41,9 +41,45 @@ def _write_benchmark(path: Path, document: dict[str, object]) -> None:
     path.write_text(json.dumps(document), encoding="utf-8")
 
 
+def _density_runner_document() -> dict[str, object]:
+    frozen = _benchmark_document()
+    robust = frozen["robust"]
+    shielded = frozen["shielded"]
+    assert isinstance(robust, dict)
+    assert isinstance(shielded, dict)
+    return {
+        "per_density": {
+            density: {
+                "per_method": {
+                    "social_spacetime_robust": robust[density],
+                    "social_spacetime_shielded": shielded[density],
+                }
+            }
+            for density in ("3", "5", "10")
+        }
+    }
+
+
 def test_load_benchmark_data_finds_expected_densities(tmp_path: Path) -> None:
     input_path = tmp_path / "benchmark.json"
     _write_benchmark(input_path, _benchmark_document())
+
+    data = load_benchmark_data(input_path)
+
+    assert data.densities == (3, 5, 10)
+    assert data.series["robust"]["success_rate"] == pytest.approx(
+        (0.2, 0.3, 0.4)
+    )
+    assert data.series["shielded"]["collision_rate"] == pytest.approx(
+        (0.35, 0.25, 0.15)
+    )
+
+
+def test_load_benchmark_data_accepts_density_runner_output(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "density-benchmark.json"
+    _write_benchmark(input_path, _density_runner_document())
 
     data = load_benchmark_data(input_path)
 

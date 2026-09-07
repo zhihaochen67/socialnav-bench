@@ -1,0 +1,6 @@
+# Runtime and visualization
+pybullet>=3.2.7,<4
+matplotlib>=3.7,<4
+
+# Test suite
+pytest>=7,<10

@@ -188,8 +188,7 @@ socialnav-bench/
 ├── experiments/     # benchmark, analysis, plotting, and demo entry points
 ├── tests/           # regression and behavior tests
 ├── docs/assets/     # tracked figures, GIF, MP4, and trajectory comparison
-├── requirements.txt
-└── LICENSE
+└── requirements.txt
 ```
 
 ## Limitations
@@ -203,8 +202,3 @@ socialnav-bench/
   `N=10` Shielded success rate is only 18%.
 - The benchmark makes no claim of outperforming all canonical
   social-navigation systems.
-
-## License
-
-SocialNav-Bench is available under the [MIT License](LICENSE).
-Copyright (c) 2026 Zhihao Chen.
